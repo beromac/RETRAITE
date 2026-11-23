@@ -1,1 +1,1 @@
-{ "name": "mes-papiers-retraite", "version": "1.0.0", "type": "module", "private": true, "scripts": { "test": "node tests/pension.test.mjs" } }
+{ "name": "mes-papiers-retraite", "version": "1.0.0", "type": "module", "private": true, "scripts": { "test": "node tests/pension.test.mjs && node tests/extract.test.mjs" } }

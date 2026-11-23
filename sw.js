@@ -1,6 +1,6 @@
 // Service worker : fonctionnement hors ligne + réception des fichiers partagés depuis Android.
 const CACHE = 'mpr-v1';
-const FICHIERS = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'js/app.js', 'js/vault.js', 'js/zip.js', 'js/extract.js', 'js/pension.js', 'js/params.js', 'icons/icon-192.png', 'icons/icon-512.png'];
+const FICHIERS = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'js/app.js', 'js/vault.js', 'js/zip.js', 'js/extract.js', 'js/zipread.js', 'js/pension.js', 'js/params.js', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FICHIERS)).then(() => self.skipWaiting()));

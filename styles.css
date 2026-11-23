@@ -72,3 +72,15 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .kid { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: end; }
 @media (max-width: 520px) { .kid { grid-template-columns: 1fr 1fr; } .kid button { grid-column: 1 / -1; } }
 @media print { .top, .tabs, button { display: none !important; } }
+
+.dossier { margin-bottom: 10px; }
+.dossier > summary { cursor: pointer; list-style: none; padding: 10px 12px; border-radius: 10px; min-height: 44px; display: flex; align-items: center; gap: 6px; }
+.dossier > summary::-webkit-details-marker { display: none; }
+.dossier > summary::before { content: "▸"; display: inline-block; width: 1em; transition: transform .15s; }
+.dossier[open] > summary::before { transform: rotate(90deg); }
+.dossier.top > summary { background: var(--card); border: 1px solid var(--line); font-weight: 650; font-size: 1.05rem; }
+.dossier.sub > summary { font-weight: 600; padding-left: 18px; }
+.dossier .actions { padding: 6px 12px 2px; }
+.dossier.sub .actions { padding-left: 30px; }
+.dossier .contenu { padding: 8px 0 0 12px; border-left: 2px solid var(--line); margin-left: 14px; }
+.dossier.sub .contenu { margin-left: 24px; }

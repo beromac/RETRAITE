@@ -1,6 +1,7 @@
 import { Vault } from './vault.js';
 import { creerZip } from './zip.js';
-import { texteDuPdf, analyserTexte, piecesJointesEml } from './extract.js';
+import { texteDuPdf, analyserTexte, piecesJointesEml, pagesPdf, regrouperPages, decouperPdf, cleEmployeur } from './extract.js';
+import { lireZip } from './zipread.js';
 import { construireCarriere, syntheseRetraite, enfantsDroits } from './pension.js';
 import { ACTIVITES, DEFAUTS, parametresLegaux, formatAge } from './params.js';
 
@@ -44,7 +45,7 @@ const estAndroid = /Android/i.test(navigator.userAgent);
 
 // ───────────────────────── État ─────────────────────────
 const vault = new Vault();
-const state = { docs: [], profile: defaultProfile(), career: {}, tab: 'docs', filtre: { type: '', annee: '', q: '' }, queue: [] };
+const state = { docs: [], profile: defaultProfile(), career: {}, tab: 'docs', filtre: { type: '', annee: '', emp: '', q: '', vue: 'annee' }, queue: [], auto: false, total: 0, fait: 0, dossiers: {} };
 let lockTimer;
 
 function defaultProfile() {
@@ -143,30 +144,126 @@ async function recupererPartages() {
   if (fichiers.length) { history.replaceState(null, '', location.pathname); importer(fichiers); }
 }
 
-async function importer(fichiers) {
-  const items = [];
-  for (const f of fichiers) {
-    const nom = f.name || '';
-    if (/\.eml$/i.test(nom)) {
-      const pj = piecesJointesEml(await f.text());
-      if (!pj.length) toast(`Aucune pièce jointe PDF trouvée dans ${nom}`);
-      for (const p of pj) items.push({ name: p.name, type: p.type, buffer: p.bytes.buffer });
-    } else {
-      items.push({ name: nom, type: f.type || 'application/pdf', buffer: await f.arrayBuffer() });
-    }
+const MIMES = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
+const extDe = (n) => (n.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || '';
+const baseNom = (n) => n.split('/').pop();
+
+/** Déplie un fichier déposé en documents unitaires (PDF, image) : .zip et .eml sont ouverts. */
+async function deplier(nom, octets, profondeur = 0) {
+  const ext = extDe(nom);
+  if (ext === 'zip' && profondeur < 2) {
+    const { fichiers, ignores } = await lireZip(octets.buffer ? octets.buffer.slice(octets.byteOffset, octets.byteOffset + octets.byteLength) : octets);
+    if (ignores.length) toast(`Ignoré : ${ignores.slice(0, 2).join(', ')}${ignores.length > 2 ? '…' : ''}`);
+    const out = [];
+    for (const f of fichiers) out.push(...await deplier(f.name, f.bytes, profondeur + 1));
+    return out;
   }
+  if (ext === 'eml') {
+    const texte = typeof octets === 'string' ? octets : new TextDecoder().decode(octets);
+    const pj = piecesJointesEml(texte);
+    if (!pj.length) toast(`Aucune pièce jointe PDF trouvée dans ${baseNom(nom)}`);
+    return pj.map((p) => ({ name: p.name, type: p.type, buffer: p.bytes.buffer }));
+  }
+  if (!MIMES[ext]) return [];
+  const u8 = octets instanceof Uint8Array ? octets : new Uint8Array(octets);
+  return [{ name: baseNom(nom), type: MIMES[ext], buffer: u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) }];
+}
+
+async function importer(fichiers) {
+  let items = [];
+  try {
+    for (const f of fichiers) items.push(...await deplier(f.name || '', new Uint8Array(await f.arrayBuffer())));
+  } catch (e) { toast(e.message || 'Import impossible'); return; }
+  if (!items.length) { toast('Aucun PDF ou image trouvé'); return; }
+
+  // Nombre de pages de chaque PDF (pour proposer le découpage)
+  let multi = false;
+  for (const it of items) {
+    if (extDe(it.name) !== 'pdf' && !/pdf/i.test(it.type)) continue;
+    try { it.pages = await pagesPdf(it.buffer); } catch { it.pages = null; }
+    if (it.pages && it.pages.length > 1) multi = true;
+  }
+  const choix = items.length > 1 || multi ? await demanderOptionsImport(items, multi) : { mode: 'tout', auto: false };
+  if (!choix) return;
+  state.auto = choix.auto;
+
+  if (multi && choix.mode !== 'tout') {
+    const eclates = [];
+    for (const it of items) {
+      if (!it.pages || it.pages.length < 2) { eclates.push(it); continue; }
+      try {
+        const groupes = regrouperPages(it.pages, choix.mode);
+        const morceaux = await decouperPdf(it.buffer, groupes);
+        morceaux.forEach((m, i) => {
+          const a = m.pages[0] + 1, b = m.pages[m.pages.length - 1] + 1;
+          eclates.push({ name: `${baseNom(it.name).replace(/\.pdf$/i, '')}_p${a}${b > a ? '-' + b : ''}.pdf`, type: 'application/pdf', buffer: m.buffer, texte: m.pages.map((k) => it.pages[k]).join('\n') });
+        });
+      } catch (e) {
+        toast('Découpage impossible (bibliothèque PDF non chargée, réseau ?) : le PDF est gardé entier.');
+        eclates.push(it);
+      }
+    }
+    items = eclates;
+  }
+  state.total = items.length;
+  state.fait = 0;
   state.queue.push(...items);
   if (!$('#dlg').open) traiterFile();
 }
 
+function demanderOptionsImport(items, multi) {
+  return new Promise((resolve) => {
+    const dlg = $('#dlg'), form = $('#dlg-form');
+    const pages = items.reduce((s, i) => s + (i.pages ? i.pages.length : 1), 0);
+    const mode = h('select', {},
+      h('option', { value: 'auto' }, 'Détecter automatiquement chaque bulletin'),
+      h('option', { value: 'page' }, 'Une page = un document'),
+      h('option', { value: 'n:2' }, '2 pages = un document'),
+      h('option', { value: 'n:3' }, '3 pages = un document'),
+      h('option', { value: 'tout' }, 'Garder chaque PDF entier'));
+    const auto = h('input', { type: 'checkbox', checked: true });
+    form.replaceChildren(
+      h('h2', {}, 'Importer plusieurs documents'),
+      h('p', { class: 'muted' }, `${items.length} fichier${items.length > 1 ? 's' : ''}, ${pages} page${pages > 1 ? 's' : ''} au total.`),
+      multi ? h('label', {}, 'Certains PDF contiennent plusieurs pages. Comment les découper ?', mode) : null,
+      h('label', {}, auto, 'Enregistrer sans confirmation quand l’année et le type sont reconnus (sinon je vérifie chaque document)'),
+      h('p', { class: 'muted' }, 'Vous pourrez corriger chaque document ensuite avec « Modifier ». Le découpage charge une bibliothèque PDF depuis internet.'),
+      h('div', { class: 'row spread' },
+        h('button', { type: 'button', onclick: () => { dlg.close(); resolve(null); } }, 'Annuler'),
+        h('button', { class: 'primary', type: 'submit' }, 'Importer')));
+    form.onsubmit = (ev) => { ev.preventDefault(); dlg.close(); resolve({ mode: multi ? mode.value : 'tout', auto: auto.checked }); };
+    dlg.oncancel = () => resolve(null);
+    dlg.showModal();
+  });
+}
+
 async function traiterFile() {
   const item = state.queue.shift();
-  if (!item) { render(); return; }
+  if (!item) {
+    if (state.total > 1) toast(`${state.fait} document${state.fait > 1 ? 's' : ''} enregistré${state.fait > 1 ? 's' : ''}`);
+    state.auto = false; state.total = 0; state.fait = 0;
+    await charger(); render(); return;
+  }
   let suggestion = {};
-  if (/pdf/i.test(item.type) || /\.pdf$/i.test(item.name)) {
-    try { suggestion = analyserTexte(await texteDuPdf(item.buffer), item.name); }
+  if (item.texte != null) suggestion = analyserTexte(item.texte, item.name, employeursConnus());
+  else if (/pdf/i.test(item.type) || /\.pdf$/i.test(item.name)) {
+    try { suggestion = analyserTexte(await texteDuPdf(item.buffer), item.name, employeursConnus()); }
     catch { suggestion = analyserTexte('', item.name); }
   } else suggestion = analyserTexte('', item.name);
+
+  if (state.auto && suggestion.year && suggestion.type !== 'autre') {
+    const meta = {
+      kind: 'doc', type: suggestion.type, year: suggestion.year, month: suggestion.month || null, quarter: suggestion.quarter || null,
+      employer: suggestion.employer || '', brut: suggestion.brut ?? null, net: suggestion.net ?? null, ca: suggestion.ca ?? null,
+      activite: 'services', note: '', fileName: item.name, mime: item.type, size: item.buffer.byteLength, addedAt: new Date().toISOString(),
+    };
+    const id = uid();
+    await vault.put(id, meta, item.buffer);
+    state.docs.push({ id, ...meta });
+    state.fait += 1;
+    return traiterFile();
+  }
+  state.fait += 1;
   ouvrirFormulaire({ ...suggestion, fileName: item.name, mime: item.type, size: item.buffer.byteLength }, item.buffer, state.queue.length);
 }
 
@@ -179,7 +276,7 @@ function ouvrirFormulaire(doc, buffer, restants = 0) {
     year: h('input', { type: 'number', min: 1970, max: 2100, value: doc.year ?? '', required: true }),
     month: h('select', {}, h('option', { value: '' }, '—'), MOIS.map((m, i) => h('option', { value: i + 1, selected: doc.month === i + 1 }, m))),
     quarter: h('select', {}, h('option', { value: '' }, '—'), [1, 2, 3, 4].map((q) => h('option', { value: q, selected: doc.quarter === q }, `${q}${q === 1 ? 'er' : 'e'} trimestre`))),
-    employer: h('input', { type: 'text', value: doc.employer || '', placeholder: 'Employeur' }),
+    employer: h('input', { type: 'text', value: doc.employer || '', placeholder: 'Employeur', list: 'liste-employeurs', autocomplete: 'off' }),
     brut: h('input', { type: 'text', inputmode: 'decimal', value: doc.brut ?? '' }),
     net: h('input', { type: 'text', inputmode: 'decimal', value: doc.net ?? '' }),
     ca: h('input', { type: 'text', inputmode: 'decimal', value: doc.ca ?? '' }),
@@ -209,6 +306,7 @@ function ouvrirFormulaire(doc, buffer, restants = 0) {
       : doc.fileName),
     h('div', { class: 'fields' }, h('label', {}, 'Type', f.type), h('label', {}, 'Année', f.year)),
     zonePaie, zoneUrssaf,
+    h('datalist', { id: 'liste-employeurs' }, employeursConnus().map((e) => h('option', { value: e }))),
     h('label', {}, 'Note (facultatif)', f.note),
     h('div', { class: 'row spread' }, annuler, h('button', { class: 'primary', type: 'submit' }, 'Enregistrer')),
   );
@@ -243,8 +341,44 @@ const nomFichier = (d) => {
   const ext = (d.fileName.match(/\.[a-z0-9]+$/i) || ['.pdf'])[0];
   const p = d.month ? String(d.month).padStart(2, '0') : d.quarter ? `T${d.quarter}` : '00';
   const t = d.type === 'payslip' ? 'bulletin-paie' : d.type === 'urssaf' ? 'urssaf' : 'document';
-  return `${d.year}-${p}_${t}${d.employer ? '_' + d.employer.replace(/[^\w-]+/g, '-') : ''}${ext}`;
+  return `${d.year}-${p}_${t}${d.type === 'payslip' && d.employer ? '_' + sansSeparateurs(d.employer) : ''}${ext}`;
 };
+const sansSeparateurs = (x) => x.replace(/[^\p{L}\p{N}-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+const nomDossier = (x) => x.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Sans nom';
+
+/** Employeurs déjà utilisés (pour garder une orthographe unique et proposer l'autocomplétion). */
+function employeursConnus() {
+  const vus = new Map();
+  for (const d of state.docs) if (d.type === 'payslip' && d.employer?.trim()) { const k = cleEmployeur(d.employer); if (!vus.has(k)) vus.set(k, d.employer.trim()); }
+  return [...vus.values()].sort((a, b) => a.localeCompare(b, 'fr'));
+}
+/** Nom du sous-dossier d'un document : employeur, « Auto-entrepreneur » ou « Autres documents ». */
+function groupeDe(d) {
+  if (d.type === 'urssaf') return 'Auto-entrepreneur (Urssaf)';
+  if (d.employer?.trim()) return d.employer.trim();
+  return d.type === 'payslip' ? 'Employeur non renseigné' : 'Autres documents';
+}
+/** Chemin type d'un document dans un ZIP : année / employeur / fichier. */
+function cheminZip(d, pris) {
+  const base = `${d.year}/${nomDossier(groupeDe(d))}/${nomFichier(d)}`;
+  let chemin = base, i = 2;
+  while (pris.has(chemin.toLowerCase())) chemin = base.replace(/(\.[a-z0-9]+)$/i, `-${i++}$1`);
+  pris.add(chemin.toLowerCase());
+  return chemin;
+}
+async function zipDe(docs, nom) {
+  const files = [], pris = new Set();
+  for (const d of docs) { const buf = await vault.file(d.id); if (buf) files.push({ name: cheminZip(d, pris), data: new Uint8Array(buf) }); }
+  if (!files.length) return toast('Rien à télécharger');
+  sauverBlob(creerZip(files), nom);
+}
+async function renommerEmployeur(ancien, docs) {
+  const nouveau = prompt(`Renommer l’employeur « ${ancien} » (tous ses bulletins seront mis à jour ; saisissez un nom existant pour fusionner deux dossiers) :`, ancien);
+  if (nouveau == null || !nouveau.trim() || nouveau.trim() === ancien) return;
+  const canon = employeursConnus().find((e) => cleEmployeur(e) === cleEmployeur(nouveau)) || nouveau.trim();
+  for (const d of docs) { const { id, _hasFile, ...meta } = d; await vault.updateMeta(id, { ...meta, employer: canon }); }
+  await charger(); render(); toast('Employeur mis à jour');
+}
 
 async function blobDe(d) {
   const buf = await vault.file(d.id);
@@ -293,11 +427,11 @@ async function supprimer(d) {
 // ───────────────────────── Vue : documents ─────────────────────────
 function viewDocs() {
   const root = h('div');
-  const input = h('input', { type: 'file', multiple: true, accept: 'application/pdf,image/*,.eml', hidden: true });
+  const input = h('input', { type: 'file', multiple: true, accept: 'application/pdf,image/*,.eml,.zip,application/zip', hidden: true });
   input.addEventListener('change', () => { importer([...input.files]); input.value = ''; });
   const drop = h('div', { class: 'drop' },
-    h('p', {}, h('strong', {}, 'Déposez vos PDF ici'), ' ou ', h('button', { class: 'primary', onclick: () => input.click() }, 'Ajouter des documents')),
-    h('p', { class: 'muted' }, 'Bulletins de paie, déclarations ou attestations Urssaf. Vous pouvez aussi déposer un mail enregistré (.eml) : les pièces jointes PDF sont extraites.'),
+    h('p', {}, h('strong', {}, 'Déposez vos PDF ou un ZIP ici'), ' ou ', h('button', { class: 'primary', onclick: () => input.click() }, 'Ajouter des documents')),
+    h('p', { class: 'muted' }, 'Bulletins de paie, déclarations ou attestations Urssaf. Vous pouvez aussi déposer un dossier compressé (.zip), un PDF regroupant plusieurs bulletins (découpé en documents séparés) ou un mail enregistré (.eml) dont les pièces jointes sont extraites.'),
     input,
   );
   ['dragenter', 'dragover'].forEach((e) => drop.addEventListener(e, (ev) => { ev.preventDefault(); drop.classList.add('over'); }));
@@ -312,34 +446,76 @@ function viewDocs() {
   }
 
   const annees = [...new Set(state.docs.map((d) => d.year))].sort((a, b) => b - a);
+  const emps = [...new Map(state.docs.map((d) => [cleEmployeur(groupeDe(d)), groupeDe(d)])).entries()].sort((x, y) => x[1].localeCompare(y[1], 'fr'));
   const f = state.filtre;
-  const rafraichir = () => { f.type = fType.value; f.annee = fAnnee.value; f.q = fQ.value; render(); };
+  const rafraichir = () => { f.type = fType.value; f.annee = fAnnee.value; f.emp = fEmp.value; f.q = fQ.value; f.vue = fVue.value; render(); };
   const fType = h('select', { onchange: rafraichir }, h('option', { value: '' }, 'Tous les types'), Object.entries(TYPES).map(([k, v]) => h('option', { value: k, selected: f.type === k }, v)));
   const fAnnee = h('select', { onchange: rafraichir }, h('option', { value: '' }, 'Toutes les années'), annees.map((a) => h('option', { value: a, selected: String(f.annee) === String(a) }, a)));
-  const fQ = h('input', { type: 'search', placeholder: 'Rechercher (employeur, note…)', value: f.q, onchange: rafraichir });
-  root.append(h('div', { class: 'card' }, h('div', { class: 'fields' }, h('label', {}, 'Type', fType), h('label', {}, 'Année', fAnnee), h('label', {}, 'Recherche', fQ))));
+  const fEmp = h('select', { onchange: rafraichir }, h('option', { value: '' }, 'Tous les employeurs'), emps.map(([k, v]) => h('option', { value: k, selected: f.emp === k }, v)));
+  const fVue = h('select', { onchange: rafraichir }, h('option', { value: 'annee', selected: f.vue === 'annee' }, 'Année › Employeur'), h('option', { value: 'employeur', selected: f.vue === 'employeur' }, 'Employeur › Année'));
+  const fQ = h('input', { type: 'search', placeholder: 'Employeur, note, nom du fichier…', value: f.q, onchange: rafraichir });
+  root.append(h('div', { class: 'card' }, h('div', { class: 'fields' },
+    h('label', {}, 'Classer par', fVue), h('label', {}, 'Employeur', fEmp), h('label', {}, 'Année', fAnnee), h('label', {}, 'Type', fType), h('label', {}, 'Recherche', fQ))));
 
+  const norm = (x) => cleEmployeur(x || '');
   const liste = state.docs.filter((d) => (!f.type || d.type === f.type) && (!f.annee || String(d.year) === String(f.annee))
-    && (!f.q || `${d.employer} ${d.note} ${d.fileName}`.toLowerCase().includes(f.q.toLowerCase())));
-  liste.sort((a, b) => b.year - a.year || (b.month || b.quarter * 3 || 0) - (a.month || a.quarter * 3 || 0));
+    && (!f.emp || cleEmployeur(groupeDe(d)) === f.emp)
+    && (!f.q || norm(`${groupeDe(d)} ${d.note} ${d.fileName}`).includes(norm(f.q))));
+  const ordreDate = (a, b) => b.year - a.year || (b.month || b.quarter * 3 || 0) - (a.month || a.quarter * 3 || 0);
+  liste.sort(ordreDate);
 
   if (!state.docs.length) root.append(h('p', { class: 'muted' }, 'Aucun document pour l’instant. Ajoutez vos premiers bulletins ou déclarations ci-dessus.'));
-  let annee = null;
-  for (const d of liste) {
-    if (d.year !== annee) { annee = d.year; root.append(h('div', { class: 'year-title' }, annee)); }
+  else if (!liste.length) root.append(h('p', { class: 'muted' }, 'Aucun document ne correspond à ces filtres.'));
+
+  const carte = (d) => {
     const montants = d.type === 'payslip'
       ? [d.brut != null ? `brut ${eur2.format(d.brut)}` : null, d.net != null ? `net ${eur2.format(d.net)}` : null]
       : d.type === 'urssaf' ? [d.ca != null ? `CA ${eur2.format(d.ca)}` : null, ACTIVITES[d.activite]?.label] : [];
-    root.append(h('div', { class: 'card doc' },
+    return h('div', { class: 'card doc' },
       h('div', { class: 'title' }, libelle(d)),
-      h('div', { class: 'muted' }, [d.employer, ...montants, d.note].filter(Boolean).join(' · ') || d.fileName),
+      h('div', { class: 'muted' }, [groupeDe(d), ...montants, d.note].filter(Boolean).join(' · ')),
       h('div', { class: 'row' },
         h('button', { class: 'small', onclick: () => ouvrir(d) }, 'Ouvrir'),
         h('button', { class: 'small', onclick: () => telecharger(d) }, 'Télécharger'),
         h('button', { class: 'small', onclick: () => imprimer(d) }, 'Imprimer'),
         h('button', { class: 'small', onclick: () => ouvrirFormulaire(d) }, 'Modifier'),
-        h('button', { class: 'small danger', onclick: () => supprimer(d) }, 'Supprimer')),
-    ));
+        h('button', { class: 'small danger', onclick: () => supprimer(d) }, 'Supprimer')));
+  };
+  const nb = (n) => `${n} document${n > 1 ? 's' : ''}`;
+  const ouvertParDefaut = liste.length <= 30 || !!(f.q || f.annee || f.emp);
+  const dossier = (cle, titre, docs, niveau, enfants, actions = []) => {
+    const ouvert = state.dossiers[cle] ?? (niveau === 'sub' ? ouvertParDefaut : ouvertParDefaut || cle === `top:${premiereCle}`);
+    const el = h('details', { class: `dossier ${niveau}`, open: ouvert },
+      h('summary', {}, h('span', { class: 'nom' }, titre), h('span', { class: 'muted' }, ` · ${nb(docs.length)}`)),
+      h('div', { class: 'row actions' }, actions),
+      h('div', { class: 'contenu' }, enfants));
+    el.addEventListener('toggle', () => { state.dossiers[cle] = el.open; });
+    return el;
+  };
+  const grouper = (docs, cleFn) => { const m = new Map(); for (const d of docs) { const k = cleFn(d); if (!m.has(k)) m.set(k, []); m.get(k).push(d); } return m; };
+  const actionsEmp = (nom, docs) => [
+    h('button', { class: 'small', onclick: () => zipDe(docs, `${nomDossier(nom)}.zip`) }, 'Télécharger le dossier (ZIP)'),
+    docs.some((d) => d.type === 'payslip') ? h('button', { class: 'small', onclick: () => renommerEmployeur(nom, docs.filter((d) => d.type === 'payslip')) }, 'Renommer') : null];
+
+  let premiereCle = '';
+  if (f.vue === 'annee') {
+    const parAnnee = grouper(liste, (d) => d.year);
+    premiereCle = [...parAnnee.keys()][0];
+    for (const [an, docsAn] of parAnnee) {
+      const sous = [...grouper(docsAn, (d) => cleEmployeur(groupeDe(d))).values()].sort((x, y) => groupeDe(x[0]).localeCompare(groupeDe(y[0]), 'fr'));
+      root.append(dossier(`top:${an}`, String(an), docsAn, 'top',
+        sous.map((docs) => dossier(`sub:${an}:${cleEmployeur(groupeDe(docs[0]))}`, groupeDe(docs[0]), docs, 'sub', docs.map(carte), actionsEmp(groupeDe(docs[0]), docs))),
+        [h('button', { class: 'small', onclick: () => zipDe(docsAn, `${an}.zip`) }, `Télécharger ${an} (ZIP)`)]));
+    }
+  } else {
+    const parEmp = [...grouper(liste, (d) => cleEmployeur(groupeDe(d))).values()].sort((x, y) => groupeDe(x[0]).localeCompare(groupeDe(y[0]), 'fr'));
+    premiereCle = parEmp.length ? cleEmployeur(groupeDe(parEmp[0][0])) : '';
+    for (const docs of parEmp) {
+      const nom = groupeDe(docs[0]);
+      const sous = [...grouper(docs, (d) => d.year).entries()];
+      root.append(dossier(`top:${cleEmployeur(nom)}`, nom, docs, 'top',
+        sous.map(([an, ds]) => dossier(`sub:${cleEmployeur(nom)}:${an}`, String(an), ds, 'sub', ds.map(carte))), actionsEmp(nom, docs)));
+    }
   }
   return root;
 }
@@ -542,15 +718,9 @@ function viewSauvegarde() {
         h('button', { onclick: () => fichier.click() }, 'Importer une sauvegarde'), fichier)),
     h('div', { class: 'card' },
       h('h3', {}, 'Tout télécharger en clair (ZIP)'),
-      h('p', { class: 'muted' }, 'Tous vos documents rangés par année, non chiffrés : à utiliser pour un dossier de retraite ou une impression en lot. Ne conservez pas ce fichier sur un appareil partagé.'),
+      h('p', { class: 'muted' }, 'Tous vos documents rangés en dossiers par année puis par employeur, non chiffrés : à utiliser pour un dossier de retraite ou une impression en lot. Ne conservez pas ce fichier sur un appareil partagé.'),
       h('button', { onclick: async () => {
-        const files = [];
-        for (const d of state.docs) {
-          const buf = await vault.file(d.id);
-          if (buf) files.push({ name: `${d.year}/${nomFichier(d)}`, data: new Uint8Array(buf) });
-        }
-        if (!files.length) return toast('Rien à télécharger');
-        sauverBlob(creerZip(files), 'mes-papiers-retraite.zip');
+        await zipDe(state.docs, 'mes-papiers-retraite.zip');
       } }, 'Télécharger le ZIP')),
     h('div', { class: 'card' },
       h('h3', {}, 'Effacer toutes les données de cet appareil'),
