@@ -2,7 +2,8 @@
 // des champs d'un bulletin de paie / d'une déclaration Urssaf, et extraction des pièces
 // jointes d'un fichier .eml. Tout est « au mieux » : l'utilisateur valide toujours les valeurs.
 
-const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/';
+// pdf.js 6.x (build « legacy », Apache-2.0) et pdf-lib 1.17.1 (MIT) sont embarqués dans /vendor : tout fonctionne hors ligne.
+const PDFJS = new URL('../vendor/pdfjs/', import.meta.url).href;
 let pdfjsPromise = null;
 
 function chargerPdfJs() {
@@ -15,6 +16,39 @@ function chargerPdfJs() {
   return pdfjsPromise;
 }
 
+/**
+ * Reconstitue les lignes d'une page d'après la position des morceaux de texte : les PDF de paie les
+ * stockent souvent dans le désordre (libellés d'abord, montants ensuite). Colonnes séparées par 3 espaces.
+ */
+export function lignesDePage(items) {
+  const morceaux = items
+    .filter((i) => i.str && i.str.trim())
+    .map((i) => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width || 0 }))
+    .sort((a, b) => b.y - a.y || a.x - b.x);
+  const lignes = [];
+  for (const m of morceaux) {
+    const l = lignes[lignes.length - 1];
+    if (l && Math.abs(l.y - m.y) <= 3) l.items.push(m); else lignes.push({ y: m.y, items: [m] });
+  }
+  const ECHELLE = 4; // points PDF par caractère : l'indentation reproduit les colonnes de la page
+  return lignes.map((l) => {
+    l.items.sort((a, b) => a.x - b.x);
+    let out = '', fin = null;
+    for (const m of l.items) {
+      const col = Math.round(m.x / ECHELLE);
+      if (fin === null) out = ' '.repeat(col);
+      else {
+        const ecart = m.x - fin;
+        if (ecart > 8) out += ' '.repeat(Math.max(3, col - out.length));
+        else if (ecart > 1.2) out += ' ';
+      }
+      out += m.s.trim();
+      fin = m.x + m.w;
+    }
+    return out;
+  }).join('\n');
+}
+
 export async function texteDuPdf(buffer, maxPages = 3) {
   const pdfjs = await chargerPdfJs();
   const doc = await pdfjs.getDocument({ data: buffer.slice(0) }).promise;
@@ -22,7 +56,7 @@ export async function texteDuPdf(buffer, maxPages = 3) {
   for (let p = 1; p <= Math.min(doc.numPages, maxPages); p++) {
     const page = await doc.getPage(p);
     const content = await page.getTextContent();
-    out += content.items.map((i) => i.str).join(' ') + '\n';
+    out += lignesDePage(content.items) + '\n';
   }
   return out;
 }
@@ -40,6 +74,8 @@ const MOIS_NOMS = ['janvier', 'février', 'fevrier', 'mars', 'avril', 'mai', 'ju
 const MOIS_NUM = { janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, mai: 5, juin: 6, juillet: 7, août: 8, aout: 8, septembre: 9, octobre: 10, novembre: 11, décembre: 12, decembre: 12 };
 
 /** Devine type, période et montants à partir du texte brut. */
+const MONTANT = /-?\d{1,3}(?:[ \u00a0\u202f]\d{3})*,\d{2}|-?\d+,\d{2}/g;
+
 export function analyserTexte(texte, nomFichier = '', employeursConnus = []) {
   const t = texte.replace(/\s+/g, ' ');
   const res = { type: 'autre', year: null, month: null, quarter: null, brut: null, net: null, ca: null, employer: '' };
@@ -48,7 +84,9 @@ export function analyserTexte(texte, nomFichier = '', employeursConnus = []) {
   res.type = estPaie && !/attestation de chiffre|déclaration de chiffre/i.test(t) ? 'payslip' : estUrssaf ? 'urssaf' : estPaie ? 'payslip' : 'autre';
 
   // Période : « du 01/10/2025 au 31/10/2025 », « Octobre 2025 », « 10/2025 », trimestre
-  let m = t.match(/p[ée]riode[^0-9]{0,15}(?:du\s*)?(\d{2})[\/.-](\d{2})[\/.-](\d{4})/i) || t.match(/\bdu\s+(\d{2})[\/.-](\d{2})[\/.-](\d{4})\s+au\b/i);
+  const plage = t.match(/(\d{2})[\/.-](\d{2})[\/.-](\d{4})\s+(?:au|à|-)\s+(\d{2})[\/.-](\d{2})[\/.-](\d{4})/);
+  let m = plage ? [null, null, plage[5], plage[6]]
+    : t.match(/p[ée]riode[^0-9]{0,15}(?:du\s*)?(\d{2})[\/.-](\d{2})[\/.-](\d{4})/i) || t.match(/\bdu\s+(\d{2})[\/.-](\d{2})[\/.-](\d{4})\s+au\b/i);
   if (m) { res.month = Number(m[2]); res.year = Number(m[3]); }
   if (!res.year) {
     const nom = t.match(new RegExp(`\\b(${MOIS_NOMS.join('|')})\\s+(\\d{4})\\b`, 'i'));
@@ -69,10 +107,16 @@ export function analyserTexte(texte, nomFichier = '', employeursConnus = []) {
   const brut = t.match(new RegExp(`(?:salaire brut|total brut|brut mensuel|brut)\\D{0,25}${nb}`, 'i'));
   const net = t.match(new RegExp(`net (?:à|a) payer(?: avant imp[ôo]t)?\\D{0,40}${nb}`, 'i'));
   const ca = t.match(new RegExp(`chiffre d['’]affaires[^0-9]{0,60}${nb}`, 'i'));
-  if (brut) res.brut = nombreFr(brut[1]);
-  if (net) res.net = nombreFr(net[1]);
+  // Montants : on lit le dernier montant de la ligne (colonnes « base … montant »), sinon l'ancienne recherche par texte.
+  const lignes = texte.split(/\r?\n/);
+  const dernier = (re) => {
+    for (const l of lignes) if (re.test(l)) { const a = l.match(MONTANT); if (a) return nombreFr(a[a.length - 1]); }
+    return null;
+  };
+  res.brut = dernier(/total brut|salaire brut|brut total/i) ?? (brut ? nombreFr(brut[1]) : null);
+  res.net = dernier(/net\s*(?:à|a)\s*payer\s*avant/i) ?? dernier(/net\s*(?:à|a)\s*payer/i) ?? (net ? nombreFr(net[1]) : null);
   if (ca) res.ca = nombreFr(ca[1]);
-  if (res.type === 'payslip') res.employer = extraireEmployeur(t, employeursConnus);
+  if (res.type === 'payslip') res.employer = extraireEmployeur(texte, employeursConnus);
   return res;
 }
 
@@ -93,16 +137,33 @@ function nettoyerNom(n) {
 export function extraireEmployeur(texte, connus = []) {
   const t = texte.replace(/\s+/g, ' ');
   const tn = sansAccent(t);
+  const lignes = texte.split(/\r?\n/);
   const triesConnus = [...new Set(connus.filter(Boolean))].sort((a, b) => b.length - a.length);
   for (const c of triesConnus) if (c.length >= 3 && tn.includes(sansAccent(c))) return c;
 
-  const champ = t.match(new RegExp(`(?:employeur|raison sociale|d[ée]nomination(?: sociale)?|nom de l['’](?:entreprise|employeur|soci[ée]t[ée]))\\s*[:\\-]?\\s*(${MOTS}(?: ${MOTS}){0,7})`, 'i'))
+  // Bulletin à colonnes : « EMPLOYEUR   SALARIÉ   EMPLOI » puis, plus bas, le nom dans la colonne de gauche.
+  const ENTETES = /^(?:salari[ée]|n°|emploi|dossier|qualification|date|matricule|convention|siret|code|adresse|p[ée]riode|bulletin)/i;
+  const segments = (l) => [...l.matchAll(/\S(?:.*?\S)?(?=\s{3,}|$)/g)].map((m) => ({ texte: m[0], col: m.index }));
+  for (let i = 0; i < lignes.length; i++) {
+    if (!/\bEMPLOYEUR\b/.test(lignes[i]) || /employeur\s*[:\-]\s*\S/i.test(lignes[i])) continue;
+    const entete = segments(lignes[i]);
+    const k = entete.findIndex((x) => /\bEMPLOYEUR\b/.test(x.texte));
+    const limite = k >= 0 && entete[k + 1] ? entete[k + 1].col - 4 : Infinity;
+    for (let j = i + 1; j < Math.min(i + 7, lignes.length); j++) {
+      const seg = segments(lignes[j]).find((x) => x.col < limite);
+      if (!seg || ENTETES.test(seg.texte) || !/[A-Za-zÀ-ÿ]{2}/.test(seg.texte)) continue;
+      const n = nettoyerNom(seg.texte);
+      if (n) return n;
+    }
+  }
+
+  const champ = t.match(new RegExp(`(?:employeur|raison sociale|d[ée]nomination(?: sociale)?|nom de l['’](?:entreprise|employeur|soci[ée]t[ée]))\\s*:\\s*(${MOTS}(?: ${MOTS}){0,7})`, 'i'))
     || t.match(new RegExp(`(?:entreprise|soci[ée]t[ée])\\s*:\\s*(${MOTS}(?: ${MOTS}){0,7})`, 'i'));
   if (champ) { const n = nettoyerNom(champ[1]); if (n && !/^(de|du|la|le|l['’])$/i.test(n)) return n; }
 
   const FORMES = '(?:SAS|SASU|SARL|EURL|SNC|SELARL|SCOP|SCI|GIE|SA|Association)';
   const apres = t.match(new RegExp(`\\b${FORMES}\\s+([A-ZÀ-Ý][A-ZÀ-Ý'’.&-]*(?: [A-ZÀ-Ý][A-ZÀ-Ý'’.&-]*){0,3})\\b`));
-  if (apres) { const forme = apres[0].match(new RegExp(`^${FORMES}`))[0]; const n = nettoyerNom(apres[1]); if (n) return `${n} ${forme}`; }
+  if (apres) { const forme = apres[0].match(new RegExp(`^${FORMES}`))[0]; const n = nettoyerNom(apres[1]); if (n) return `${forme} ${n}`; }
   const avant = t.match(new RegExp(`\\b([A-ZÀ-Ý][A-ZÀ-Ý0-9'’.&-]+(?: [A-ZÀ-Ý0-9'’.&-]+){0,3}) ${FORMES}\\b`));
   if (avant) { const n = nettoyerNom(avant[0]); if (n) return n; }
 
@@ -143,7 +204,7 @@ export async function pagesPdf(buffer, maxPages = 400) {
   for (let p = 1; p <= Math.min(doc.numPages, maxPages); p++) {
     const page = await doc.getPage(p);
     const content = await page.getTextContent();
-    out.push(content.items.map((i) => i.str).join(' '));
+    out.push(lignesDePage(content.items));
   }
   return out;
 }
@@ -185,7 +246,7 @@ function chargerPdfLib() {
   if (!pdfLibPromise) {
     pdfLibPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';
+      s.src = new URL('../vendor/pdf-lib.min.js', import.meta.url).href;
       s.onload = () => resolve(window.PDFLib);
       s.onerror = () => { pdfLibPromise = null; reject(new Error('pdf-lib indisponible')); };
       document.head.append(s);

@@ -56,12 +56,18 @@ export function construireCarriere(docs = [], overrides = {}, annee = new Date()
   for (let y = min; y <= max; y++) {
     const l = par.get(y) || { year: y, salaire: 0, ca: 0, revenuInd: 0, revenuIndCipav: 0, mois: new Set(), nbDocs: 0 };
     const ov = overrides[y] || {};
-    const total = l.salaire + l.revenuInd + l.revenuIndCipav;
     const seuil = 150 * parAnnee(SMIC_H, y);
-    const trimAuto = Math.min(4, Math.floor(total / seuil));
+    // Trimestres déclarés par l'Urssaf (attestation) saisis à la main : ils s'ajoutent aux trimestres de salarié, 4 par an au maximum.
+    const urssafSaisi = ov.urssaf != null && ov.urssaf !== '' ? Math.max(0, Math.min(4, Math.floor(Number(ov.urssaf)))) : null;
+    const revInd = l.revenuInd + l.revenuIndCipav;
+    const indepRetenu = urssafSaisi != null ? Math.max(revInd, urssafSaisi * seuil) : revInd;
+    const total = l.salaire + indepRetenu;
+    const trimAuto = urssafSaisi != null
+      ? Math.min(4, Math.min(4, Math.floor(l.salaire / seuil)) + urssafSaisi)
+      : Math.min(4, Math.floor(total / seuil));
     const revenuEff = ov.revenu != null && ov.revenu !== '' ? Number(ov.revenu) : total;
     const trimEff = ov.trim != null && ov.trim !== '' ? Number(ov.trim) : (ov.revenu != null && ov.revenu !== '' ? Math.min(4, Math.floor(revenuEff / seuil)) : trimAuto);
-    const baseSam = ov.revenu != null && ov.revenu !== '' ? revenuEff : l.salaire + l.revenuInd;
+    const baseSam = ov.revenu != null && ov.revenu !== '' ? revenuEff : l.salaire + (urssafSaisi != null ? Math.max(l.revenuInd, urssafSaisi * seuil) : l.revenuInd);
     rows.push({
       year: y,
       salaire: r2(l.salaire),
@@ -73,7 +79,8 @@ export function construireCarriere(docs = [], overrides = {}, annee = new Date()
       revenuEff: r2(revenuEff),
       trimEff,
       revenuSam: r2(Math.min(baseSam, parAnnee(PASS, y))),
-      override: !!(ov.revenu != null && ov.revenu !== '') || !!(ov.trim != null && ov.trim !== ''),
+      urssafSaisi,
+      override: !!(ov.revenu != null && ov.revenu !== '') || !!(ov.trim != null && ov.trim !== '') || urssafSaisi != null,
     });
   }
   return rows;

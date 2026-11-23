@@ -39,6 +39,18 @@ test('validation des trimestres : salaire et auto-entrepreneur', () => {
   assert.equal(r26.trimEff, 4); // seuil publié : 24 115 € de CA en vente pour 4 trimestres
 });
 
+test('trimestres Urssaf saisis : s\'ajoutent au salariat, plafonnés à 4', () => {
+  // 2 trimestres de salarié (6 mois à 2 000 €) + 3 déclarés Urssaf = 4 (plafond)
+  const docs = [];
+  for (let m = 1; m <= 2; m++) docs.push({ type: 'payslip', year: 2022, month: m, brut: 2000 });
+  const r = construireCarriere(docs, { 2022: { urssaf: 3 }, 2021: { urssaf: 3 } }, 2022);
+  assert.equal(r.find((x) => x.year === 2022).trimEff, 4);
+  const r21 = r.find((x) => x.year === 2021);
+  assert.equal(r21.trimEff, 3);                 // aucun salaire, 3 trimestres Urssaf
+  assert.ok(r21.revenuSam >= 3 * 150 * 10.25);  // revenu minimal cohérent pour le calcul du SAM
+  assert.equal(r21.urssafSaisi, 3);
+});
+
 test('une correction manuelle remplace le calcul automatique', () => {
   const rows = construireCarriere([{ type: 'payslip', year: 2023, month: 1, brut: 100 }], { 2023: { trim: 3, revenu: 15000 } }, 2023);
   assert.equal(rows[0].trimEff, 3);

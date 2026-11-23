@@ -45,7 +45,7 @@ const estAndroid = /Android/i.test(navigator.userAgent);
 
 // ───────────────────────── État ─────────────────────────
 const vault = new Vault();
-const state = { docs: [], profile: defaultProfile(), career: {}, tab: 'docs', filtre: { type: '', annee: '', emp: '', q: '', vue: 'annee' }, queue: [], auto: false, total: 0, fait: 0, dossiers: {} };
+const state = { docs: [], profile: defaultProfile(), career: {}, tab: 'docs', filtre: { type: '', annee: '', emp: '', q: '', exact: false, vue: 'annee' }, queue: [], auto: false, total: 0, fait: 0, dossiers: {} };
 let lockTimer;
 
 function defaultProfile() {
@@ -199,7 +199,7 @@ async function importer(fichiers) {
           eclates.push({ name: `${baseNom(it.name).replace(/\.pdf$/i, '')}_p${a}${b > a ? '-' + b : ''}.pdf`, type: 'application/pdf', buffer: m.buffer, texte: m.pages.map((k) => it.pages[k]).join('\n') });
         });
       } catch (e) {
-        toast('Découpage impossible (bibliothèque PDF non chargée, réseau ?) : le PDF est gardé entier.');
+        toast('Découpage impossible (PDF protégé ou abîmé ?) : il est gardé entier.');
         eclates.push(it);
       }
     }
@@ -227,7 +227,7 @@ function demanderOptionsImport(items, multi) {
       h('p', { class: 'muted' }, `${items.length} fichier${items.length > 1 ? 's' : ''}, ${pages} page${pages > 1 ? 's' : ''} au total.`),
       multi ? h('label', {}, 'Certains PDF contiennent plusieurs pages. Comment les découper ?', mode) : null,
       h('label', {}, auto, 'Enregistrer sans confirmation quand l’année et le type sont reconnus (sinon je vérifie chaque document)'),
-      h('p', { class: 'muted' }, 'Vous pourrez corriger chaque document ensuite avec « Modifier ». Le découpage charge une bibliothèque PDF depuis internet.'),
+      h('p', { class: 'muted' }, 'Vous pourrez corriger chaque document ensuite avec « Modifier ».'),
       h('div', { class: 'row spread' },
         h('button', { type: 'button', onclick: () => { dlg.close(); resolve(null); } }, 'Annuler'),
         h('button', { class: 'primary', type: 'submit' }, 'Importer')));
@@ -448,19 +448,29 @@ function viewDocs() {
   const annees = [...new Set(state.docs.map((d) => d.year))].sort((a, b) => b - a);
   const emps = [...new Map(state.docs.map((d) => [cleEmployeur(groupeDe(d)), groupeDe(d)])).entries()].sort((x, y) => x[1].localeCompare(y[1], 'fr'));
   const f = state.filtre;
-  const rafraichir = () => { f.type = fType.value; f.annee = fAnnee.value; f.emp = fEmp.value; f.q = fQ.value; f.vue = fVue.value; render(); };
+  const rafraichir = () => { f.type = fType.value; f.annee = fAnnee.value; f.emp = fEmp.value; f.q = fQ.value; f.exact = fMode.value === 'exact'; f.vue = fVue.value; render(); };
   const fType = h('select', { onchange: rafraichir }, h('option', { value: '' }, 'Tous les types'), Object.entries(TYPES).map(([k, v]) => h('option', { value: k, selected: f.type === k }, v)));
   const fAnnee = h('select', { onchange: rafraichir }, h('option', { value: '' }, 'Toutes les années'), annees.map((a) => h('option', { value: a, selected: String(f.annee) === String(a) }, a)));
   const fEmp = h('select', { onchange: rafraichir }, h('option', { value: '' }, 'Tous les employeurs'), emps.map(([k, v]) => h('option', { value: k, selected: f.emp === k }, v)));
   const fVue = h('select', { onchange: rafraichir }, h('option', { value: 'annee', selected: f.vue === 'annee' }, 'Année › Employeur'), h('option', { value: 'employeur', selected: f.vue === 'employeur' }, 'Employeur › Année'));
   const fQ = h('input', { type: 'search', placeholder: 'Employeur, note, nom du fichier…', value: f.q, onchange: rafraichir });
+  const fMode = h('select', { onchange: rafraichir }, h('option', { value: 'contient', selected: !f.exact }, 'Contient le mot'), h('option', { value: 'exact', selected: f.exact }, 'Nom exact de l’employeur'));
   root.append(h('div', { class: 'card' }, h('div', { class: 'fields' },
-    h('label', {}, 'Classer par', fVue), h('label', {}, 'Employeur', fEmp), h('label', {}, 'Année', fAnnee), h('label', {}, 'Type', fType), h('label', {}, 'Recherche', fQ))));
+    h('label', {}, 'Classer par', fVue), h('label', {}, 'Employeur', fEmp), h('label', {}, 'Année', fAnnee), h('label', {}, 'Type', fType), h('label', {}, 'Recherche', fQ), h('label', {}, 'Type de recherche', fMode))));
 
   const norm = (x) => cleEmployeur(x || '');
+  // « Contient » : tous les mots saisis doivent apparaître (dans l'ordre que l'on veut) ; « exact » : nom d'employeur identique (guillemets acceptés).
+  const requete = norm(f.q.replace(/["«»“”]/g, ''));
+  const mots = requete.split(' ').filter(Boolean);
+  const correspond = (d) => {
+    if (!requete) return true;
+    if (f.exact) return norm(groupeDe(d)) === requete;
+    const texte = norm(`${groupeDe(d)} ${d.note} ${d.fileName}`);
+    return mots.every((m) => texte.includes(m));
+  };
   const liste = state.docs.filter((d) => (!f.type || d.type === f.type) && (!f.annee || String(d.year) === String(f.annee))
     && (!f.emp || cleEmployeur(groupeDe(d)) === f.emp)
-    && (!f.q || norm(`${groupeDe(d)} ${d.note} ${d.fileName}`).includes(norm(f.q))));
+    && correspond(d));
   const ordreDate = (a, b) => b.year - a.year || (b.month || b.quarter * 3 || 0) - (a.month || a.quarter * 3 || 0);
   liste.sort(ordreDate);
 
@@ -524,7 +534,7 @@ function viewDocs() {
 function viewCarriere() {
   const root = h('div');
   root.append(h('h2', {}, 'Ma carrière année par année'));
-  root.append(h('p', { class: 'muted' }, 'Calculée à partir de vos documents. Pour les années sans papier (ou si votre relevé de carrière info-retraite.fr dit autre chose), corrigez directement le revenu ou le nombre de trimestres : la correction remplace le calcul.'));
+  root.append(h('p', { class: 'muted' }, 'Calculée à partir de vos documents. Auto-entrepreneur : saisissez dans « Trim. Urssaf » le nombre de trimestres (0 à 4) indiqué par votre attestation ou votre espace Urssaf ; ils s’ajoutent à vos trimestres de salarié, dans la limite de 4 par an, et remplacent l’estimation tirée du chiffre d’affaires. Les colonnes « Revenu retenu » et « Trimestres (corr.) » remplacent, elles, tout le calcul de l’année (utile si votre relevé info-retraite.fr dit autre chose).'));
   const rows = construireCarriere(state.docs, state.career);
   const anneeCourante = new Date().getFullYear();
   if (!rows.length) { root.append(h('p', { class: 'muted' }, 'Ajoutez des documents ou une année manuellement.')); }
@@ -545,13 +555,14 @@ function viewCarriere() {
         incomplet ? h('span', { class: 'pill warn', style: 'margin-left:6px' }, `${r.mois}/12 mois`) : null),
       h('td', {}, r.salaire ? eur.format(r.salaire) : '—'),
       h('td', {}, r.ca ? eur.format(r.ca) : '—'),
+      h('td', {}, h('input', { class: 'narrow', type: 'text', inputmode: 'numeric', value: ov.urssaf ?? '', placeholder: '0-4', 'aria-label': `Trimestres déclarés Urssaf ${r.year}`, onchange: (e) => maj('urssaf', e.target.value) })),
       h('td', {}, h('input', { type: 'text', inputmode: 'decimal', value: ov.revenu ?? '', placeholder: String(Math.round(r.salaire + r.revenuInd)), onchange: (e) => maj('revenu', e.target.value) })),
       h('td', {}, h('input', { class: 'narrow', type: 'text', inputmode: 'numeric', value: ov.trim ?? '', placeholder: String(r.trimAuto), onchange: (e) => maj('trim', e.target.value) })),
       h('td', {}, h('strong', {}, r.trimEff)),
     ));
   }
   root.append(h('div', { class: 'card scroll' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['Année', 'Salaires bruts', 'CA auto-entr.', 'Revenu retenu (€)', 'Trimestres (corr.)', 'Trimestres'].map((t) => h('th', {}, t)))),
+    h('thead', {}, h('tr', {}, ['Année', 'Salaires bruts', 'CA auto-entr.', 'Trim. Urssaf (saisie)', 'Revenu retenu (€)', 'Trimestres (corr.)', 'Trimestres'].map((t) => h('th', {}, t)))),
     tbody)));
 
   const total = rows.reduce((s, r) => s + r.trimEff, 0);
@@ -561,12 +572,13 @@ function viewCarriere() {
     h('h3', {}, 'Ajouter une année manquante'),
     (() => {
       const y = h('input', { type: 'number', min: 1970, max: anneeCourante, placeholder: 'Année' });
-      const t = h('input', { type: 'number', min: 0, max: 4, placeholder: 'Trimestres' });
+      const t = h('input', { type: 'number', min: 0, max: 4, placeholder: 'Trim. total' });
+      const u = h('input', { type: 'number', min: 0, max: 4, placeholder: 'Trim. Urssaf' });
       const r = h('input', { type: 'text', inputmode: 'decimal', placeholder: 'Revenu (€)' });
-      return h('div', { class: 'row' }, h('div', { style: 'width:110px' }, y), h('div', { style: 'width:110px' }, t), h('div', { style: 'width:140px' }, r),
+      return h('div', { class: 'row' }, h('div', { style: 'width:110px' }, y), h('div', { style: 'width:110px' }, t), h('div', { style: 'width:110px' }, u), h('div', { style: 'width:140px' }, r),
         h('button', { class: 'primary', onclick: async () => {
           if (!y.value) return toast('Indiquez l’année');
-          state.career[Number(y.value)] = { ...(t.value !== '' ? { trim: Number(t.value) } : {}), ...(r.value !== '' ? { revenu: num(r.value) } : {}) };
+          state.career[Number(y.value)] = { ...(t.value !== '' ? { trim: Number(t.value) } : {}), ...(u.value !== '' ? { urssaf: Number(u.value) } : {}), ...(r.value !== '' ? { revenu: num(r.value) } : {}) };
           await saveCareer(); render();
         } }, 'Ajouter'));
     })(),

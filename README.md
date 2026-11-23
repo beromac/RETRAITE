@@ -30,4 +30,4 @@ Les paramètres légaux (âge, durée, SMIC, PASS, points Agirc-Arrco) sont dans
 
 ## Limites
 
-Estimation indicative. Non modélisés : CIPAV/RCI (pension à saisir à la main), carrière longue, adoption, handicap, plafonnement des majorations Agirc-Arrco, carrières à l'étranger. La lecture automatique des PDF (pdf.js, chargé depuis cdnjs) est au mieux : vérifiez toujours les valeurs proposées.
+Estimation indicative. Non modélisés : CIPAV/RCI (pension à saisir à la main), carrière longue, adoption, handicap, plafonnement des majorations Agirc-Arrco, carrières à l'étranger. La lecture automatique des PDF (pdf.js, embarqué dans `vendor/`, fonctionne hors ligne) est au mieux : vérifiez toujours les valeurs proposées. Les PDF scannés ou photographiés (sans texte) ne sont pas lisibles : saisie manuelle.
