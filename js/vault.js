@@ -1,43 +1,12 @@
-// Coffre local chiffré : IndexedDB + AES-GCM (clé dérivée de la phrase secrète par PBKDF2).
-// Rien ne quitte l'appareil. Seuls les identifiants des enregistrements sont en clair.
+// Coffre chiffré : AES-GCM, clé dérivée de la phrase secrète par PBKDF2. Rien ne quitte l'appareil.
+// Le lieu de stockage (navigateur ou dossier d'une clé USB) est fourni par un « store » (voir stores.js).
+// Seuls les identifiants des enregistrements sont en clair.
+import { b64 } from './stores.js';
 
-const DB_NAME = 'mes-papiers-retraite';
+
 const ITER = 310000;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-
-const b64 = {
-  to: (buf) => {
-    const bytes = new Uint8Array(buf);
-    let s = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    return btoa(s);
-  },
-  from: (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0)),
-};
-
-function ouvrirDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      db.createObjectStore('meta');
-      db.createObjectStore('records', { keyPath: 'id' });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-const tx = (db, store, mode, fn) =>
-  new Promise((resolve, reject) => {
-    const t = db.transaction(store, mode);
-    const s = t.objectStore(store);
-    const r = fn(s);
-    t.oncomplete = () => resolve(r && r.result !== undefined ? r.result : undefined);
-    t.onerror = () => reject(t.error);
-    t.onabort = () => reject(t.error);
-  });
 
 async function deriveKey(phrase, salt, iterations = ITER) {
   const base = await crypto.subtle.importKey('raw', enc.encode(phrase), 'PBKDF2', false, ['deriveKey']);
@@ -58,12 +27,12 @@ async function chiffrer(key, data) {
 const dechiffrer = (key, { iv, ct }) => crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
 
 export class Vault {
-  constructor() { this.db = null; this.key = null; }
+  constructor() { this.store = null; this.key = null; }
 
-  async init() {
-    this.db = await ouvrirDB();
-    const salt = await tx(this.db, 'meta', 'readonly', (s) => s.get('salt'));
-    return { exists: !!salt };
+  async init(store) {
+    this.store = store;
+    await store.open();
+    return { exists: !!(await store.getMeta('salt')) };
   }
 
   get unlocked() { return !!this.key; }
@@ -72,17 +41,18 @@ export class Vault {
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const key = await deriveKey(phrase, salt);
     const check = await chiffrer(key, enc.encode('ok'));
-    await tx(this.db, 'meta', 'readwrite', (s) => { s.put(salt, 'salt'); s.put(check, 'check'); });
+    await this.store.setMeta('salt', salt);
+    await this.store.setMeta('check', check);
     this.key = key;
   }
 
   async unlock(phrase) {
-    const salt = await tx(this.db, 'meta', 'readonly', (s) => s.get('salt'));
-    const check = await tx(this.db, 'meta', 'readonly', (s) => s.get('check'));
+    const salt = await this.store.getMeta('salt');
+    const check = await this.store.getMeta('check');
+    if (!salt || !check) return false;
     const key = await deriveKey(phrase, salt);
     try {
-      const v = dec.decode(await dechiffrer(key, check));
-      if (v !== 'ok') return false;
+      if (dec.decode(await dechiffrer(key, check)) !== 'ok') return false;
     } catch { return false; }
     this.key = key;
     return true;
@@ -94,43 +64,41 @@ export class Vault {
   async put(id, meta, fileBuffer = null) {
     const m = await chiffrer(this.key, enc.encode(JSON.stringify(meta)));
     const f = fileBuffer ? await chiffrer(this.key, fileBuffer) : null;
-    await tx(this.db, 'records', 'readwrite', (s) => s.put({ id, m, f }));
+    await this.store.putRecord({ id, m, f });
   }
 
   async updateMeta(id, meta) {
-    const rec = await tx(this.db, 'records', 'readonly', (s) => s.get(id));
+    const rec = await this.store.getRecord(id);
     if (!rec) return;
     rec.m = await chiffrer(this.key, enc.encode(JSON.stringify(meta)));
-    await tx(this.db, 'records', 'readwrite', (s) => s.put(rec));
+    await this.store.putRecord(rec);
   }
 
-  async remove(id) { await tx(this.db, 'records', 'readwrite', (s) => s.delete(id)); }
+  async remove(id) { await this.store.deleteRecord(id); }
 
   async metas() {
-    const recs = await tx(this.db, 'records', 'readonly', (s) => s.getAll());
     const out = [];
-    for (const r of recs) {
-      try { out.push({ id: r.id, ...JSON.parse(dec.decode(await dechiffrer(this.key, r.m))), _hasFile: !!r.f }); } catch { /* ignoré */ }
+    for (const r of await this.store.allMetas()) {
+      try { out.push({ id: r.id, ...JSON.parse(dec.decode(await dechiffrer(this.key, r.m))), _hasFile: r.hasFile }); } catch { /* ignoré */ }
     }
     return out;
   }
 
   async file(id) {
-    const rec = await tx(this.db, 'records', 'readonly', (s) => s.get(id));
+    const rec = await this.store.getRecord(id);
     if (!rec || !rec.f) return null;
     return dechiffrer(this.key, rec.f);
   }
 
   async wipe() {
-    await tx(this.db, 'records', 'readwrite', (s) => s.clear());
-    await tx(this.db, 'meta', 'readwrite', (s) => s.clear());
+    await this.store.clearAll();
     this.key = null;
   }
 
   /** Sauvegarde chiffrée (JSON) : à conserver sur une clé USB ou à transférer vers un autre appareil. */
   async exportBackup() {
-    const salt = await tx(this.db, 'meta', 'readonly', (s) => s.get('salt'));
-    const recs = await tx(this.db, 'records', 'readonly', (s) => s.getAll());
+    const salt = await this.store.getMeta('salt');
+    const recs = await this.store.allRecords();
     const pack = (x) => (x ? { iv: b64.to(x.iv), ct: b64.to(x.ct) } : null);
     return JSON.stringify({
       format: 'mes-papiers-retraite', version: 1, iterations: ITER, salt: b64.to(salt),
@@ -151,9 +119,22 @@ export class Vault {
       const file = r.f ? await dechiffrer(key, unpack(r.f)) : null;
       const m = await chiffrer(this.key, metaBytes);
       const f = file ? await chiffrer(this.key, file) : null;
-      await tx(this.db, 'records', 'readwrite', (s) => s.put({ id: r.id, m, f }));
+      await this.store.putRecord({ id: r.id, m, f });
       n++;
     }
+    return n;
+  }
+
+  /**
+   * Copie tout le coffre (même phrase secrète, sans la déchiffrer) vers un autre store vide :
+   * sert à mettre ses données sur une clé USB.
+   */
+  async copierVers(dest) {
+    await dest.open();
+    await dest.setMeta('salt', await this.store.getMeta('salt'));
+    await dest.setMeta('check', await this.store.getMeta('check'));
+    let n = 0;
+    for (const r of await this.store.allRecords()) { await dest.putRecord(r); n++; }
     return n;
   }
 }

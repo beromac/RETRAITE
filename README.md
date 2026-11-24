@@ -20,6 +20,12 @@ Application web installable (PWA, PC et Android) pour :
 
 Ne mettez **jamais** vos vrais documents dans le dépôt.
 
+## Version clé USB (sans internet)
+
+`portable/Mes-papiers-retraite.html` est un **fichier unique** (code, styles et bibliothèques PDF compris) qui s'ouvre par double-clic depuis une clé USB, sans serveur ni connexion. Dans Chrome ou Edge, il enregistre les documents chiffrés **dans un dossier de la clé** (`portable/donnees/`) ; on retrouve ses données sur n'importe quel ordinateur en rechoisissant ce dossier. Copiez le contenu du dossier `portable/` sur la clé (voir `portable/LISEZMOI.txt`). L'application en ligne propose aussi de copier le coffre existant vers une clé et de télécharger ce fichier.
+
+Le fichier est régénéré par `npm run build` (esbuild) et par le workflow GitHub à chaque déploiement.
+
 ## Développement
 
 ```

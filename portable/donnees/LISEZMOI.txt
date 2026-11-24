@@ -1,0 +1,3 @@
+Dossier réservé à l'application "Mes papiers retraite".
+Il contiendra uniquement des fichiers chiffrés (.json et .mpr) : ne les renommez pas, ne les modifiez pas.
+Choisissez ce dossier dans l'application pour y enregistrer vos documents.

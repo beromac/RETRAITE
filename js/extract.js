@@ -3,13 +3,23 @@
 // jointes d'un fichier .eml. Tout est « au mieux » : l'utilisateur valide toujours les valeurs.
 
 // pdf.js 6.x (build « legacy », Apache-2.0) et pdf-lib 1.17.1 (MIT) sont embarqués dans /vendor : tout fonctionne hors ligne.
-const PDFJS = new URL('../vendor/pdfjs/', import.meta.url).href;
+// Version portable (un seul fichier .html ouvert depuis une clé) : les bibliothèques sont incluses dans la page
+// en base64 (balises #emb-*) puis chargées via des URL « blob: », car le navigateur interdit de charger
+// des modules ou des workers depuis file://.
+const embarque = (id, type) => {
+  const b64 = document.getElementById(id)?.textContent?.trim();
+  if (!b64) return null;
+  return URL.createObjectURL(new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], { type }));
+};
+const vendor = (chemin) => new URL(`../vendor/${chemin}`, import.meta.url).href;
 let pdfjsPromise = null;
 
 function chargerPdfJs() {
   if (!pdfjsPromise) {
-    pdfjsPromise = import(/* @vite-ignore */ PDFJS + 'pdf.min.mjs').then((m) => {
-      m.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.mjs';
+    const principal = embarque('emb-pdfjs', 'text/javascript');
+    const worker = embarque('emb-pdfjs-worker', 'text/javascript');
+    pdfjsPromise = import(/* @vite-ignore */ principal || vendor('pdfjs/pdf.min.mjs')).then((m) => {
+      m.GlobalWorkerOptions.workerSrc = worker || vendor('pdfjs/pdf.worker.min.mjs');
       return m;
     });
   }
@@ -246,7 +256,7 @@ function chargerPdfLib() {
   if (!pdfLibPromise) {
     pdfLibPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = new URL('../vendor/pdf-lib.min.js', import.meta.url).href;
+      s.src = embarque('emb-pdflib', 'text/javascript') || vendor('pdf-lib.min.js');
       s.onload = () => resolve(window.PDFLib);
       s.onerror = () => { pdfLibPromise = null; reject(new Error('pdf-lib indisponible')); };
       document.head.append(s);

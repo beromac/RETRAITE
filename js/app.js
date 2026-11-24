@@ -1,4 +1,5 @@
 import { Vault } from './vault.js';
+import { IdbStore, DossierStore, prefsGet, prefsSet, prefsDel, dossierPossible } from './stores.js';
 import { creerZip } from './zip.js';
 import { texteDuPdf, analyserTexte, piecesJointesEml, pagesPdf, regrouperPages, decouperPdf, cleEmployeur } from './extract.js';
 import { lireZip } from './zipread.js';
@@ -49,6 +50,8 @@ const estAndroid = /Android/i.test(navigator.userAgent);
 
 // ───────────────────────── État ─────────────────────────
 const vault = new Vault();
+const PORTABLE = location.protocol === 'file:';
+let stockage = null;
 const state = { docs: [], profile: defaultProfile(), career: {}, tab: 'docs', filtre: { type: '', annee: '', emp: '', q: '', exact: false, vue: 'annee' }, queue: [], auto: false, total: 0, fait: 0, doublons: [], dossiers: {} };
 let lockTimer;
 
@@ -92,6 +95,98 @@ function verrouiller() {
   renderLock(true);
 }
 
+// ───────────────────────── Lieu de stockage (navigateur ou dossier / clé USB) ─────────────────────────
+function ecran(titre, ...contenu) {
+  const view = $('#view');
+  view.replaceChildren(h('div', { class: 'card lock' }, h('h2', {}, titre), ...contenu));
+}
+
+async function choisirDossier() {
+  const dir = await window.showDirectoryPicker({ mode: 'readwrite', id: 'mpr-donnees' });
+  const st = new DossierStore(dir);
+  await st.tester();
+  await prefsSet('mode', 'dossier');
+  await prefsSet('dir', dir);
+  return st;
+}
+async function utiliserNavigateur() {
+  await prefsSet('mode', 'navigateur');
+  await prefsDel('dir');
+  return new IdbStore();
+}
+
+/** Premier lancement : où enregistrer le coffre ? */
+function ecranChoixStockage() {
+  return new Promise((resolve) => {
+    const err = h('p', { class: 'muted', style: 'color:var(--accent)' });
+    const essayer = (fn) => async () => { err.textContent = ''; try { resolve(await fn()); } catch (e) { if (e?.name !== 'AbortError') err.textContent = `Impossible d’utiliser ce dossier : ${e?.message || e}`; } };
+    ecran('Où enregistrer vos données ?',
+      PORTABLE ? h('p', { class: 'muted' }, 'Vous utilisez la version portable : elle fonctionne sans internet, directement depuis la clé.') : null,
+      dossierPossible()
+        ? h('div', {}, h('p', {}, h('strong', {}, 'Sur une clé USB ou dans un dossier'), ' (recommandé pour une clé)'),
+          h('p', { class: 'muted' }, 'Vos documents chiffrés sont écrits dans le dossier que vous choisissez et rien n’est laissé sur l’ordinateur. Choisissez (ou créez) un dossier vide sur la clé, par exemple « donnees ». Sur un autre ordinateur, choisissez le même dossier pour retrouver vos données.'),
+          h('button', { class: 'primary', onclick: essayer(choisirDossier) }, 'Choisir un dossier…'))
+        : h('div', { class: 'notice' }, 'Votre navigateur ne peut pas écrire sur une clé USB. Ouvrez l’application avec Chrome ou Edge pour enregistrer sur la clé, ou utilisez le stockage dans ce navigateur et la sauvegarde chiffrée.'),
+      h('hr'),
+      h('p', {}, h('strong', {}, 'Dans ce navigateur uniquement')),
+      h('p', { class: 'muted' }, 'Les données restent sur cet ordinateur, dans ce navigateur. Elles disparaissent si vous effacez les données de navigation : pensez à la sauvegarde chiffrée.'),
+      h('button', { onclick: essayer(utiliserNavigateur) }, 'Utiliser ce navigateur'),
+      err);
+  });
+}
+
+/** Dossier mémorisé mais inaccessible (clé débranchée, autorisation à renouveler…). */
+function ecranDossierIndisponible(handle, raison) {
+  return new Promise((resolve) => {
+    const err = h('p', { class: 'muted', style: 'color:var(--accent)' }, raison || '');
+    const reessayer = async () => {
+      err.textContent = '';
+      try {
+        if ((await handle.queryPermission({ mode: 'readwrite' })) !== 'granted' && (await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') throw new Error('autorisation refusée');
+        const st = new DossierStore(handle);
+        await st.tester();
+        resolve(st);
+      } catch (e) { err.textContent = `Dossier toujours inaccessible (${e?.message || e}). Vérifiez que la clé est branchée.`; }
+    };
+    ecran(`Dossier « ${handle.name} » indisponible`,
+      h('p', { class: 'muted' }, 'Branchez la clé USB contenant vos données, puis autorisez à nouveau l’accès au dossier.'),
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: reessayer }, 'Autoriser / réessayer'),
+        h('button', { onclick: async () => { await prefsDel('mode'); await prefsDel('dir'); resolve(await ecranChoixStockage()); } }, 'Choisir un autre dossier')),
+      err);
+  });
+}
+
+async function ouvrirStockage() {
+  if (await prefsGet('forcerChoix')) { await prefsDel('forcerChoix'); return ecranChoixStockage(); }
+  const mode = await prefsGet('mode');
+  if (mode === 'dossier' && dossierPossible()) {
+    const handle = await prefsGet('dir');
+    if (handle) {
+      try {
+        if ((await handle.queryPermission({ mode: 'readwrite' })) === 'granted') { const st = new DossierStore(handle); await st.tester(); return st; }
+        return await ecranDossierIndisponible(handle, '');
+      } catch (e) { return await ecranDossierIndisponible(handle, `Accès impossible : ${e?.message || e}`); }
+    }
+  }
+  if (mode === 'navigateur') return new IdbStore();
+  // Version en ligne : navigateur par défaut (le dossier / la clé reste proposé dans l'onglet Sauvegarde). Version portable : on demande.
+  return PORTABLE ? ecranChoixStockage() : utiliserNavigateur();
+}
+
+async function copierSurCle() {
+  if (!dossierPossible()) return toast('Ce navigateur ne peut pas écrire sur une clé USB : utilisez Chrome ou Edge.');
+  let dir;
+  try { dir = await window.showDirectoryPicker({ mode: 'readwrite', id: 'mpr-donnees' }); } catch { return; }
+  try {
+    const dest = new DossierStore(dir);
+    await dest.tester();
+    if (await dest.contientCoffre()) return alert('Ce dossier contient déjà un coffre. Choisissez un dossier vide.');
+    const n = await vault.copierVers(dest);
+    alert(`${n} élément${n > 1 ? 's' : ''} copié${n > 1 ? 's' : ''} dans le dossier « ${dir.name} ».\n\nVotre phrase secrète reste la même. Ouvrez maintenant l’application depuis la clé et choisissez ce dossier comme lieu de stockage.`);
+  } catch (e) { toast(`Copie impossible : ${e?.message || e}`); }
+}
+
 async function renderLock(exists) {
   const view = $('#view');
   view.replaceChildren();
@@ -100,6 +195,7 @@ async function renderLock(exists) {
   const err = h('p', { class: 'muted', style: 'color:var(--accent)' });
   const form = h('form', { class: 'card lock' },
     h('h2', {}, exists ? 'Déverrouiller le coffre' : 'Créer votre coffre'),
+    h('p', { class: 'muted' }, `Stockage : ${stockage.label}.`),
     exists
       ? h('p', { class: 'muted' }, 'Vos documents sont chiffrés sur cet appareil.')
       : h('p', { class: 'muted' }, 'Choisissez une phrase secrète d’au moins 10 caractères. Elle chiffre tout ce que vous enregistrez ici. Elle ne peut pas être récupérée : si vous l’oubliez, les documents sont perdus. Notez-la en lieu sûr.'),
@@ -784,6 +880,17 @@ function viewSauvegarde() {
   return h('div', {},
     h('h2', {}, 'Sauvegarde et transfert'),
     h('div', { class: 'card' },
+      h('h3', {}, 'Lieu de stockage'),
+      h('p', {}, `Vos données chiffrées sont enregistrées dans ${stockage.label}.`),
+      stockage.kind === 'navigateur' ? h('p', { class: 'muted' }, 'Elles restent sur cet ordinateur. Pour les emporter sur une clé USB, copiez le coffre vers un dossier de la clé.') : null,
+      h('div', { class: 'row' },
+        stockage.kind === 'navigateur' ? h('button', { class: 'primary', onclick: copierSurCle }, 'Copier mon coffre sur une clé USB…') : null,
+        h('button', { onclick: async () => { if (confirm('Changer de lieu de stockage ? Vos données actuelles ne sont pas effacées : vous pourrez y revenir.')) { await prefsDel('mode'); await prefsDel('dir'); await prefsSet('forcerChoix', true); location.reload(); } } }, 'Changer de lieu de stockage'))),
+    PORTABLE ? null : h('div', { class: 'card' },
+      h('h3', {}, 'Version clé USB (sans internet)'),
+      h('p', { class: 'muted' }, 'Un seul fichier à copier sur une clé USB. Il s’ouvre par double-clic dans Chrome ou Edge, sans installation ni connexion, et enregistre vos données chiffrées dans un dossier de la clé.'),
+      h('a', { class: 'btn primary', href: 'portable/Mes-papiers-retraite.html', download: 'Mes-papiers-retraite.html', style: 'display:inline-block;text-decoration:none' }, 'Télécharger la version clé USB')),
+    h('div', { class: 'card' },
       h('h3', {}, 'Sauvegarde chiffrée'),
       h('p', { class: 'muted' }, 'Un seul fichier, chiffré avec votre phrase secrète, pour passer de votre ordinateur à votre téléphone ou garder une copie de secours. Il peut être stocké sans risque sur un cloud ou une clé USB.'),
       h('div', { class: 'row' },
@@ -823,10 +930,11 @@ $('#btn-lock').addEventListener('click', verrouiller);
 
 (async function demarrer() {
   if (!window.crypto?.subtle || !window.indexedDB) {
-    $('#view').append(h('div', { class: 'notice' }, 'Ce navigateur ne permet pas le stockage chiffré. Utilisez une version récente de Chrome, Edge, Firefox ou Safari, en HTTPS.'));
+    $('#view').append(h('div', { class: 'notice' }, 'Ce navigateur ne permet pas le stockage chiffré. Utilisez une version récente de Chrome, Edge, Firefox ou Safari.'));
     return;
   }
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-  const { exists } = await vault.init();
+  if (!PORTABLE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  stockage = await ouvrirStockage();
+  const { exists } = await vault.init(stockage);
   renderLock(exists);
 })();

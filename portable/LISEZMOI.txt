@@ -1,0 +1,43 @@
+MES PAPIERS RETRAITE - VERSION CLÉ USB
+======================================
+
+Contenu de la clé
+  Mes-papiers-retraite.html   l'application (un seul fichier, aucune installation)
+  donnees\                    le dossier où seront rangés vos documents CHIFFRÉS
+
+Démarrer
+  1. Branchez la clé et ouvrez "Mes-papiers-retraite.html" par double-clic
+     avec Google Chrome ou Microsoft Edge (ordinateur Windows, Mac ou Linux).
+     Aucune connexion internet n'est nécessaire.
+  2. Au premier lancement, cliquez sur "Choisir un dossier..." et sélectionnez
+     le dossier "donnees" de la clé (ne choisissez pas la racine de la clé :
+     le navigateur la refuse). Autorisez la modification des fichiers.
+  3. Créez votre phrase secrète (10 caractères minimum). Elle chiffre tout.
+     ELLE NE PEUT PAS ÊTRE RÉCUPÉRÉE : notez-la en lieu sûr.
+
+Sur un autre ordinateur
+  Ouvrez de nouveau le fichier depuis la clé, choisissez le même dossier
+  "donnees" et saisissez votre phrase secrète. Vous retrouvez tout.
+
+Sécurité
+  - Les bulletins, les montants et le contenu du dossier "donnees" sont chiffrés
+    (AES-256). Sans la phrase secrète, la clé perdue ou volée ne livre rien.
+  - Aucune donnée n'est envoyée sur internet. Rien n'est laissé sur l'ordinateur
+    quand vous choisissez le dossier de la clé.
+  - Cliquez sur "Verrouiller" avant de quitter ; le coffre se verrouille aussi
+    seul après 10 minutes d'inactivité.
+  - Ne retirez pas la clé pendant un enregistrement. Faites aussi, de temps en
+    temps, une copie du dossier "donnees" sur un autre support (une clé peut
+    tomber en panne) ou une "Sauvegarde chiffrée" depuis l'onglet Sauvegarde.
+
+Limites
+  - Firefox et Safari ne peuvent pas écrire sur la clé : l'application y
+    enregistre dans le navigateur de l'ordinateur ; utilisez alors la
+    sauvegarde chiffrée pour emporter vos données.
+  - Une clé protégée en écriture ne permet pas d'enregistrer.
+  - Les estimations de retraite sont indicatives : seule votre caisse de
+    retraite fait foi (www.info-retraite.fr).
+
+Déjà des données dans votre navigateur ?
+  Dans l'application en ligne : onglet Sauvegarde > "Copier mon coffre sur une
+  clé USB...", puis ouvrez la version clé et choisissez le même dossier.
