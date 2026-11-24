@@ -39,13 +39,17 @@ function toast(msg) {
 }
 
 const uid = () => crypto.randomUUID();
+async function sha256(buf) {
+  const d = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 const num = (v) => (v === '' || v == null ? null : Number(String(v).replace(',', '.')));
 const dateFr = (d) => d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
 const estAndroid = /Android/i.test(navigator.userAgent);
 
 // ───────────────────────── État ─────────────────────────
 const vault = new Vault();
-const state = { docs: [], profile: defaultProfile(), career: {}, tab: 'docs', filtre: { type: '', annee: '', emp: '', q: '', exact: false, vue: 'annee' }, queue: [], auto: false, total: 0, fait: 0, dossiers: {} };
+const state = { docs: [], profile: defaultProfile(), career: {}, tab: 'docs', filtre: { type: '', annee: '', emp: '', q: '', exact: false, vue: 'annee' }, queue: [], auto: false, total: 0, fait: 0, doublons: [], dossiers: {} };
 let lockTimer;
 
 function defaultProfile() {
@@ -175,6 +179,7 @@ async function importer(fichiers) {
     for (const f of fichiers) items.push(...await deplier(f.name || '', new Uint8Array(await f.arrayBuffer())));
   } catch (e) { toast(e.message || 'Import impossible'); return; }
   if (!items.length) { toast('Aucun PDF ou image trouvé'); return; }
+  await assurerHashes();
 
   // Nombre de pages de chaque PDF (pour proposer le découpage)
   let multi = false;
@@ -207,6 +212,7 @@ async function importer(fichiers) {
   }
   state.total = items.length;
   state.fait = 0;
+  state.doublons = [];
   state.queue.push(...items);
   if (!$('#dlg').open) traiterFile();
 }
@@ -237,13 +243,44 @@ function demanderOptionsImport(items, multi) {
   });
 }
 
+/** Empreinte (SHA-256) des documents enregistrés avant l'existence de la détection de doublons. */
+async function assurerHashes() {
+  const sans = state.docs.filter((d) => !d.hash && d._hasFile);
+  if (!sans.length) return;
+  if (sans.length > 5) toast('Vérification des doublons…');
+  for (const d of sans) {
+    const buf = await vault.file(d.id);
+    if (!buf) continue;
+    d.hash = await sha256(buf);
+    const { id, _hasFile, ...meta } = d;
+    await vault.updateMeta(id, meta);
+  }
+}
+const doublonExact = (hash) => state.docs.find((d) => d.hash && d.hash === hash);
+/** Même type, même période, même employeur (fichier différent, par ex. re-téléchargé). */
+function doublonProbable(m) {
+  if (!m.type || m.type === 'autre' || !m.year) return null;
+  return state.docs.find((d) => d.type === m.type && d.year === m.year && (d.month || null) === (m.month || null) && (d.quarter || null) === (m.quarter || null)
+    && cleEmployeur(groupeDe(d)) === cleEmployeur(groupeDe({ type: m.type, employer: m.employer }))) || null;
+}
+const memesMontants = (a, b) => (b.type === 'urssaf' ? b.ca != null && a.ca === b.ca : b.brut != null && a.brut === b.brut && a.net === b.net);
+
 async function traiterFile() {
   const item = state.queue.shift();
   if (!item) {
-    if (state.total > 1) toast(`${state.fait} document${state.fait > 1 ? 's' : ''} enregistré${state.fait > 1 ? 's' : ''}`);
-    state.auto = false; state.total = 0; state.fait = 0;
+    const nd = state.doublons.length;
+    if (state.total > 1 || nd) {
+      const parties = [];
+      if (state.fait || !nd) parties.push(`${state.fait} document${state.fait > 1 ? 's' : ''} enregistré${state.fait > 1 ? 's' : ''}`);
+      if (nd) parties.push(nd === 1 && state.total === 1 ? `déjà enregistré : ${state.doublons[0]}` : `${nd} doublon${nd > 1 ? 's' : ''} ignoré${nd > 1 ? 's' : ''}`);
+      toast(parties.join(' · '));
+    }
+    state.auto = false; state.total = 0; state.fait = 0; state.doublons = [];
     await charger(); render(); return;
   }
+  item.hash = await sha256(item.buffer);
+  const exact = doublonExact(item.hash);
+  if (exact) { state.doublons.push(libelle(exact)); return traiterFile(); }
   let suggestion = {};
   if (item.texte != null) suggestion = analyserTexte(item.texte, item.name, employeursConnus());
   else if (/pdf/i.test(item.type) || /\.pdf$/i.test(item.name)) {
@@ -255,8 +292,11 @@ async function traiterFile() {
     const meta = {
       kind: 'doc', type: suggestion.type, year: suggestion.year, month: suggestion.month || null, quarter: suggestion.quarter || null,
       employer: suggestion.employer || '', brut: suggestion.brut ?? null, net: suggestion.net ?? null, ca: suggestion.ca ?? null,
-      activite: 'services', note: '', fileName: item.name, mime: item.type, size: item.buffer.byteLength, addedAt: new Date().toISOString(),
+      activite: 'services', note: '', fileName: item.name, mime: item.type, size: item.buffer.byteLength, addedAt: new Date().toISOString(), hash: item.hash,
     };
+    const prob = doublonProbable(meta);
+    if (prob && memesMontants(prob, meta)) { state.doublons.push(libelle(prob)); return traiterFile(); }
+    if (prob) { state.fait += 1; return ouvrirFormulaire({ ...suggestion, fileName: item.name, mime: item.type, size: item.buffer.byteLength, hash: item.hash }, item.buffer, state.queue.length, prob); }
     const id = uid();
     await vault.put(id, meta, item.buffer);
     state.docs.push({ id, ...meta });
@@ -264,10 +304,10 @@ async function traiterFile() {
     return traiterFile();
   }
   state.fait += 1;
-  ouvrirFormulaire({ ...suggestion, fileName: item.name, mime: item.type, size: item.buffer.byteLength }, item.buffer, state.queue.length);
+  ouvrirFormulaire({ ...suggestion, fileName: item.name, mime: item.type, size: item.buffer.byteLength, hash: item.hash }, item.buffer, state.queue.length, doublonProbable(suggestion));
 }
 
-function ouvrirFormulaire(doc, buffer, restants = 0) {
+function ouvrirFormulaire(doc, buffer, restants = 0, doublon = null) {
   const dlg = $('#dlg');
   const form = $('#dlg-form');
   const estNouveau = !!buffer;
@@ -308,10 +348,13 @@ function ouvrirFormulaire(doc, buffer, restants = 0) {
     zonePaie, zoneUrssaf,
     h('datalist', { id: 'liste-employeurs' }, employeursConnus().map((e) => h('option', { value: e }))),
     h('label', {}, 'Note (facultatif)', f.note),
-    h('div', { class: 'row spread' }, annuler, h('button', { class: 'primary', type: 'submit' }, 'Enregistrer')),
+    doublon ? h('div', { class: 'notice' }, h('strong', {}, 'Doublon possible : '), `un document « ${libelle(doublon)} » (${groupeDe(doublon)}) est déjà enregistré pour cette période${doublon.brut != null ? `, brut ${eur2.format(doublon.brut)}` : ''}. Choisissez de l’ignorer, de le garder en plus ou de remplacer l’ancien.`) : null,
+    h('div', { class: 'row spread' }, annuler,
+      doublon && estNouveau ? h('button', { type: 'button', onclick: () => sauver(doublon.id) }, 'Remplacer l’ancien') : null,
+      h('button', { class: 'primary', type: 'submit' }, doublon && estNouveau ? 'Garder les deux' : 'Enregistrer')),
   );
-  form.onsubmit = async (ev) => {
-    ev.preventDefault();
+  form.onsubmit = (ev) => { ev.preventDefault(); sauver(null); };
+  const sauver = async (remplaceId) => {
     const type = f.type.value;
     const moisSel = type === 'urssaf' ? moisUrssaf.value : f.month.value;
     const meta = {
@@ -319,8 +362,9 @@ function ouvrirFormulaire(doc, buffer, restants = 0) {
       quarter: type === 'urssaf' && f.quarter.value ? Number(f.quarter.value) : null,
       employer: f.employer.value.trim(), brut: num(f.brut.value), net: num(f.net.value), ca: num(f.ca.value),
       activite: f.activite.value, note: f.note.value.trim(),
-      fileName: doc.fileName, mime: doc.mime, size: doc.size, addedAt: doc.addedAt || new Date().toISOString(),
+      fileName: doc.fileName, mime: doc.mime, size: doc.size, addedAt: doc.addedAt || new Date().toISOString(), hash: doc.hash,
     };
+    if (remplaceId) await vault.remove(remplaceId);
     if (estNouveau) await vault.put(uid(), meta, buffer);
     else await vault.updateMeta(doc.id, meta);
     await charger();
@@ -707,6 +751,23 @@ function blocEnfants(p, droits = enfantsDroits(p.sexe, p.enfants)) {
     h('p', { class: 'muted' }, 'Non modélisés : adoption, enfant handicapé, carrière longue, congés parentaux, majorations Agirc-Arrco plafonnées.'));
 }
 
+async function nettoyerDoublons() {
+  await assurerHashes();
+  const groupes = new Map();
+  for (const d of state.docs) if (d.hash) { if (!groupes.has(d.hash)) groupes.set(d.hash, []); groupes.get(d.hash).push(d); }
+  const aSupprimer = [];
+  for (const g of groupes.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => String(a.addedAt).localeCompare(String(b.addedAt)));
+    aSupprimer.push(...g.slice(1));
+  }
+  if (!aSupprimer.length) return toast('Aucun doublon trouvé');
+  const detail = aSupprimer.slice(0, 8).map((d) => `• ${libelle(d)} (${groupeDe(d)})`).join('\n');
+  if (!confirm(`${aSupprimer.length} doublon${aSupprimer.length > 1 ? 's' : ''} trouvé${aSupprimer.length > 1 ? 's' : ''} :\n${detail}${aSupprimer.length > 8 ? '\n…' : ''}\n\nLes supprimer et garder un seul exemplaire de chaque ?`)) return;
+  for (const d of aSupprimer) await vault.remove(d.id);
+  await charger(); render(); toast(`${aSupprimer.length} doublon${aSupprimer.length > 1 ? 's supprimés' : ' supprimé'}`);
+}
+
 // ───────────────────────── Vue : sauvegarde ─────────────────────────
 function viewSauvegarde() {
   const fichier = h('input', { type: 'file', accept: '.json,application/json', hidden: true });
@@ -734,6 +795,10 @@ function viewSauvegarde() {
       h('button', { onclick: async () => {
         await zipDe(state.docs, 'mes-papiers-retraite.zip');
       } }, 'Télécharger le ZIP')),
+    h('div', { class: 'card' },
+      h('h3', {}, 'Chercher les doublons'),
+      h('p', { class: 'muted' }, 'Repère les documents enregistrés plusieurs fois (fichiers identiques) et vous propose de ne garder que le plus ancien.'),
+      h('button', { onclick: nettoyerDoublons }, 'Chercher les doublons')),
     h('div', { class: 'card' },
       h('h3', {}, 'Effacer toutes les données de cet appareil'),
       h('button', { class: 'danger', onclick: async () => {
