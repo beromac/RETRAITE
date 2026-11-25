@@ -84,3 +84,5 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .dossier.sub .actions { padding-left: 30px; }
 .dossier .contenu { padding: 8px 0 0 12px; border-left: 2px solid var(--line); margin-left: 14px; }
 .dossier.sub .contenu { margin-left: 24px; }
+
+[hidden] { display: none !important; }

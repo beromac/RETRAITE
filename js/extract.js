@@ -91,7 +91,12 @@ export function analyserTexte(texte, nomFichier = '', employeursConnus = []) {
   const res = { type: 'autre', year: null, month: null, quarter: null, brut: null, net: null, ca: null, employer: '' };
   const estUrssaf = /urssaf|micro-?entrepreneur|auto-?entrepreneur|chiffre d'affaires|chiffre d’affaires/i.test(t);
   const estPaie = /bulletin de (paie|salaire)|net à payer|salaire brut|net a payer/i.test(t) || /paie|bulletin|payslip/i.test(nomFichier);
-  res.type = estPaie && !/attestation de chiffre|déclaration de chiffre/i.test(t) ? 'payslip' : estUrssaf ? 'urssaf' : estPaie ? 'payslip' : 'autre';
+  // Un bulletin de paie reste prioritaire (il peut mentionner « indemnités journalières » ou « France Travail »).
+  const titrePaie = /bulletin de (paie|salaire|paye)/i.test(t);
+  const estChomage = /france travail|p[ôo]le[ -]emploi|allocation d['’]aide au retour|allocation de solidarit[ée] sp[ée]cifique/i.test(t);
+  const estIj = /indemnit[ée]s? journali[èe]res?|assurance maladie|\bcpam\b|\bameli\b|\bijss\b/i.test(t);
+  res.type = titrePaie ? 'payslip' : estChomage ? 'chomage' : estIj ? 'ij'
+    : estPaie && !/attestation de chiffre|déclaration de chiffre/i.test(t) ? 'payslip' : estUrssaf ? 'urssaf' : estPaie ? 'payslip' : 'autre';
 
   // Période : « du 01/10/2025 au 31/10/2025 », « Octobre 2025 », « 10/2025 », trimestre
   const plage = t.match(/(\d{2})[\/.-](\d{2})[\/.-](\d{4})\s+(?:au|à|-)\s+(\d{2})[\/.-](\d{2})[\/.-](\d{4})/);
@@ -123,6 +128,17 @@ export function analyserTexte(texte, nomFichier = '', employeursConnus = []) {
     for (const l of lignes) if (re.test(l)) { const a = l.match(MONTANT); if (a) return nombreFr(a[a.length - 1]); }
     return null;
   };
+  if (res.type === 'ij' || res.type === 'chomage') {
+    const nj = t.match(/(\d{1,3})\s+jours?\s+(?:indemnis[ée]s?|d['’]indemnisation)/i)
+      || t.match(/(?:nombre de jours|jours indemnis[ée]s|jours d['’]indemnisation)[^0-9]{0,40}(\d{1,3})(?!\d|[,.]\d)/i);
+    if (nj) res.jours = Number(nj[1]);
+    const sjr = t.match(/(?:salaire journalier de r[ée]f[ée]rence|\bSJR\b)[^0-9]{0,40}(\d{1,3}(?:[ \u00a0]\d{3})*,\d{2})/i);
+    if (sjr) res.sjr = nombreFr(sjr[1]);
+    res.montant = dernier(/montant net|net vers[ée]|total vers[ée]|montant vers[ée]|total des (?:indemnit|allocation)|net [àa] payer/i);
+    res.nature = /maternit[ée]|paternit[ée]|adoption|naissance/i.test(t) ? 'maternite'
+      : /invalidit[ée]/i.test(t) ? 'invalidite'
+      : /accident du travail|maladie professionnelle|AT\/MP/i.test(t) ? 'at' : 'maladie';
+  }
   res.brut = dernier(/total brut|salaire brut|brut total/i) ?? (brut ? nombreFr(brut[1]) : null);
   res.net = dernier(/net\s*(?:à|a)\s*payer\s*avant/i) ?? dernier(/net\s*(?:à|a)\s*payer/i) ?? (net ? nombreFr(net[1]) : null);
   if (ca) res.ca = nombreFr(ca[1]);

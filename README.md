@@ -5,6 +5,7 @@ Application web installable (PWA, PC et Android) pour :
 - ranger bulletins de paie et déclarations Urssaf dans un coffre **chiffré sur l'appareil** (AES-256-GCM, clé dérivée de votre phrase secrète) ;
 - les classer automatiquement en dossiers **année › employeur** (ou employeur › année), avec filtre et recherche par employeur ;
 - les ouvrir, télécharger (à l'unité, par dossier ou tout en ZIP) et imprimer ;
+- prendre en compte les **indemnités journalières** (Assurance Maladie : maladie, accident du travail, maternité, invalidité) et le **chômage indemnisé** (France Travail) comme périodes assimilées : 60 jours de maladie, 90 de maternité ou d'invalidité, 50 de chômage = 1 trimestre, 4 par an au maximum (points Agirc-Arrco du chômage estimés avec le salaire journalier de référence) ;
 - détecter les **doublons** (même fichier, ou même bulletin re-téléchargé) et ne pas les enregistrer deux fois ;
 - importer un ZIP ou un PDF regroupant plusieurs bulletins (découpé en documents séparés) ;
 - importer par glisser-déposer, fichier `.eml` (pièces jointes extraites) ou **Partager → Mes papiers retraite** depuis Gmail sur Android ;

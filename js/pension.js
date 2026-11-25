@@ -1,5 +1,5 @@
 // Moteur de calcul retraite : fonctions pures, sans accès au DOM (testables avec Node).
-import { SMIC_H, PASS, AGIRC, ACTIVITES, DEFAUTS, parAnnee, parametresLegaux } from './params.js';
+import { SMIC_H, PASS, AGIRC, ACTIVITES, DEFAUTS, JOURS_PAR_TRIMESTRE, parAnnee, parametresLegaux } from './params.js';
 
 const r2 = (x) => Math.round(x * 100) / 100;
 
@@ -29,7 +29,7 @@ export function enfantsDroits(sexe, enfants = []) {
 export function construireCarriere(docs = [], overrides = {}, annee = new Date().getFullYear()) {
   const par = new Map();
   const ligne = (y) => {
-    if (!par.has(y)) par.set(y, { year: y, salaire: 0, ca: 0, revenuInd: 0, revenuIndCipav: 0, mois: new Set(), nbDocs: 0 });
+    if (!par.has(y)) par.set(y, { year: y, salaire: 0, ca: 0, revenuInd: 0, revenuIndCipav: 0, mois: new Set(), nbDocs: 0, j: { mal: 0, inv: 0, mat: 0, cho: 0 }, assietteChomage: 0, montantAssim: 0 });
     return par.get(y);
   };
   for (const d of docs) {
@@ -45,6 +45,16 @@ export function construireCarriere(docs = [], overrides = {}, annee = new Date()
       l.ca += ca;
       if (act.cipav) l.revenuIndCipav += ca * act.facteur;
       else l.revenuInd += ca * act.facteur;
+    } else if (d.type === 'ij') {
+      const k = d.nature === 'maternite' ? 'mat' : d.nature === 'invalidite' ? 'inv' : 'mal';
+      l.j[k] += Number(d.jours) || 0;
+      l.montantAssim += Number(d.montant) || 0;
+    } else if (d.type === 'chomage') {
+      const j = Number(d.jours) || 0;
+      l.j.cho += j;
+      l.montantAssim += Number(d.montant) || 0;
+      // Agirc-Arrco : assiette = 60 % du salaire journalier de référence par jour indemnisé
+      if (d.sjr) l.assietteChomage += 0.6 * Number(d.sjr) * j;
     }
   }
   for (const y of Object.keys(overrides)) ligne(Number(y));
@@ -54,7 +64,7 @@ export function construireCarriere(docs = [], overrides = {}, annee = new Date()
   const max = Math.max(...annees, annee);
   const rows = [];
   for (let y = min; y <= max; y++) {
-    const l = par.get(y) || { year: y, salaire: 0, ca: 0, revenuInd: 0, revenuIndCipav: 0, mois: new Set(), nbDocs: 0 };
+    const l = par.get(y) || { year: y, salaire: 0, ca: 0, revenuInd: 0, revenuIndCipav: 0, mois: new Set(), nbDocs: 0, j: { mal: 0, inv: 0, mat: 0, cho: 0 }, assietteChomage: 0, montantAssim: 0 };
     const ov = overrides[y] || {};
     const seuil = 150 * parAnnee(SMIC_H, y);
     // Trimestres déclarés par l'Urssaf (attestation) saisis à la main : ils s'ajoutent aux trimestres de salarié, 4 par an au maximum.
@@ -62,11 +72,15 @@ export function construireCarriere(docs = [], overrides = {}, annee = new Date()
     const revInd = l.revenuInd + l.revenuIndCipav;
     const indepRetenu = urssafSaisi != null ? Math.max(revInd, urssafSaisi * seuil) : revInd;
     const total = l.salaire + indepRetenu;
-    const trimAuto = urssafSaisi != null
+    const trimTravail = urssafSaisi != null
       ? Math.min(4, Math.min(4, Math.floor(l.salaire / seuil)) + urssafSaisi)
       : Math.min(4, Math.floor(total / seuil));
+    // Périodes assimilées (indemnités journalières, chômage indemnisé) : s'ajoutent au travail, 4 trimestres par an au maximum.
+    const trimAssim = Math.min(4, Math.floor(l.j.mal / JOURS_PAR_TRIMESTRE.maladie) + Math.floor(l.j.inv / JOURS_PAR_TRIMESTRE.invalidite)
+      + Math.floor(l.j.mat / JOURS_PAR_TRIMESTRE.maternite) + Math.floor(l.j.cho / JOURS_PAR_TRIMESTRE.chomage));
+    const trimAuto = Math.min(4, trimTravail + trimAssim);
     const revenuEff = ov.revenu != null && ov.revenu !== '' ? Number(ov.revenu) : total;
-    const trimEff = ov.trim != null && ov.trim !== '' ? Number(ov.trim) : (ov.revenu != null && ov.revenu !== '' ? Math.min(4, Math.floor(revenuEff / seuil)) : trimAuto);
+    const trimEff = ov.trim != null && ov.trim !== '' ? Number(ov.trim) : Math.min(4, (ov.revenu != null && ov.revenu !== '' ? Math.floor(revenuEff / seuil) : trimTravail) + trimAssim);
     const baseSam = ov.revenu != null && ov.revenu !== '' ? revenuEff : l.salaire + (urssafSaisi != null ? Math.max(l.revenuInd, urssafSaisi * seuil) : l.revenuInd);
     rows.push({
       year: y,
@@ -76,6 +90,9 @@ export function construireCarriere(docs = [], overrides = {}, annee = new Date()
       mois: l.mois.size,
       nbDocs: l.nbDocs,
       trimAuto,
+      trimAssim,
+      joursMal: l.j.mal, joursInv: l.j.inv, joursMat: l.j.mat, joursCho: l.j.cho,
+      assietteChomage: r2(l.assietteChomage), montantAssim: r2(l.montantAssim),
       revenuEff: r2(revenuEff),
       trimEff,
       revenuSam: r2(Math.min(baseSam, parAnnee(PASS, y))),
@@ -131,6 +148,7 @@ export function estimer(entree, ageDepartMois) {
     const t1 = Math.min(brut, parAnnee(PASS, r.year)) * AGIRC.tauxT1;
     const t2 = Math.max(0, brut - parAnnee(PASS, r.year)) * AGIRC.tauxT2;
     points += ((t1 + t2) * coef(r.year)) / AGIRC.prixAchat;
+    points += ((r.assietteChomage || 0) * AGIRC.tauxT1 * coef(r.year)) / AGIRC.prixAchat; // points du chômage indemnisé
   }
 
   let trimProj = 0;
@@ -142,7 +160,8 @@ export function estimer(entree, ageDepartMois) {
     const donneesSam = y === anneeCourante && ligneCourante ? ligneCourante.revenuSam : 0;
     const revProj = continuer ? proj * part : 0;
     const rev = Math.max(donnees, revProj);
-    const trim = Math.min(4, Math.floor(rev / (150 * smicRef)));
+    const assimCourante = y === anneeCourante && ligneCourante ? ligneCourante.trimAssim || 0 : 0;
+    const trim = Math.min(4, Math.floor(rev / (150 * smicRef)) + assimCourante);
     trimProj += trim;
     const revSam = Math.min(Math.max(donneesSam, Math.min(revProj, passRef)), passRef);
     if (revSam > 0 || continuer) projetes.push(revSam);

@@ -62,4 +62,23 @@ test('bulletin à colonnes : période, employeur de la colonne de gauche, brut e
     { type: 'payslip', year: 2021, month: 9, brut: 1844, net: 1416.72, employer: 'SAS EXEMPLE OPTIQUE' });
 });
 
+test('relevé d\'indemnités journalières (Assurance Maladie)', () => {
+  const t = 'ameli Assurance Maladie Relevé des indemnités journalières Période du 03/03/2025 au 30/04/2025 Arrêt de travail maladie Nombre de jours indemnisés : 58 Montant net versé   1 234,56 €';
+  const a = analyserTexte(t, 'releve.pdf', []);
+  assert.deepEqual({ type: a.type, year: a.year, month: a.month, jours: a.jours, nature: a.nature, montant: a.montant, employer: a.employer },
+    { type: 'ij', year: 2025, month: 4, jours: 58, nature: 'maladie', montant: 1234.56, employer: '' });
+});
+test('maternité et invalidité reconnues', () => {
+  assert.equal(analyserTexte('Assurance Maladie indemnités journalières de maternité 98 jours indemnisés').nature, 'maternite');
+  assert.equal(analyserTexte('CPAM pension d\'invalidité indemnités journalières 90 jours indemnisés').nature, 'invalidite');
+});
+test('attestation France Travail : jours indemnisés et SJR', () => {
+  const t = 'France Travail Attestation de paiement Allocation d\'aide au retour à l\'emploi (ARE) Période du 01/01/2025 au 31/12/2025 Nombre de jours indemnisés : 214 Salaire journalier de référence : 84,32 € Total net versé   6 543,21';
+  const a = analyserTexte(t, 'ft.pdf', []);
+  assert.equal(a.type, 'chomage'); assert.equal(a.year, 2025); assert.equal(a.jours, 214); assert.equal(a.sjr, 84.32); assert.equal(a.montant, 6543.21);
+});
+test('un bulletin de paie reste un bulletin même s\'il cite France Travail', () => {
+  const a = analyserTexte('BULLETIN DE PAIE Contribution France Travail 4,05 % Indemnités journalières subrogation TOTAL BRUT 78,00 1 844,00', 'x.pdf');
+  assert.equal(a.type, 'payslip');
+});
 console.log(`\n${ok} tests réussis`);

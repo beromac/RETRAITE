@@ -51,6 +51,41 @@ test('trimestres Urssaf saisis : s\'ajoutent au salariat, plafonnés à 4', () =
   assert.equal(r21.urssafSaisi, 3);
 });
 
+test('indemnités journalières et chômage : jours → trimestres assimilés', () => {
+  const docs = [
+    { type: 'ij', year: 2023, nature: 'maladie', jours: 59 },          // < 60 j : 0
+    { type: 'ij', year: 2024, nature: 'maladie', jours: 130 },         // 2 trimestres
+    { type: 'ij', year: 2024, nature: 'maternite', jours: 90 },        // +1
+    { type: 'chomage', year: 2025, jours: 120, sjr: 80 },              // 2 trimestres
+    { type: 'ij', year: 2022, nature: 'invalidite', jours: 89 },       // 0
+    { type: 'chomage', year: 2021, jours: 400 },                       // plafonné à 4
+  ];
+  const r = Object.fromEntries(construireCarriere(docs, {}, 2025).map((x) => [x.year, x]));
+  assert.equal(r[2023].trimEff, 0);
+  assert.equal(r[2024].trimEff, 3);
+  assert.equal(r[2025].trimEff, 2);
+  assert.equal(r[2022].trimEff, 0);
+  assert.equal(r[2021].trimEff, 4);
+  assert.equal(r[2025].assietteChomage, 0.6 * 80 * 120);
+});
+
+test('les périodes assimilées s\'ajoutent au travail, 4 par an maximum', () => {
+  const docs = [{ type: 'ij', year: 2022, nature: 'maladie', jours: 180 }]; // 3 trimestres
+  for (let m = 1; m <= 2; m++) docs.push({ type: 'payslip', year: 2022, month: m, brut: 2000 }); // 2 trimestres de salaire
+  assert.equal(construireCarriere(docs, {}, 2022)[0].trimEff, 4);
+  const seul = construireCarriere(docs.slice(0, 1).concat({ type: 'payslip', year: 2022, month: 1, brut: 1000 }), {}, 2022)[0];
+  assert.equal(seul.trimEff, 3 + 1 > 4 ? 4 : 3 + Math.floor(1000 / (150 * 11.88)));
+});
+
+test('le chômage indemnisé donne des points Agirc-Arrco et des trimestres à la projection', () => {
+  const rows = construireCarriere([{ type: 'chomage', year: 2025, jours: 200, sjr: 90 }], {}, 2026);
+  const base = { sexe: 'M', naissance: new Date(1980, 0, 1), enfants: [], now: new Date(2026, 10, 25), revalorisation: 0, continuer: false };
+  const avec = estimer({ ...base, rows }, 64 * 12);
+  const sans = estimer({ ...base, rows: rows.map((r) => ({ ...r, assietteChomage: 0 })) }, 64 * 12);
+  assert.ok(avec.points > sans.points);
+  assert.ok(avec.trimAcquis >= 4);
+});
+
 test('une correction manuelle remplace le calcul automatique', () => {
   const rows = construireCarriere([{ type: 'payslip', year: 2023, month: 1, brut: 100 }], { 2023: { trim: 3, revenu: 15000 } }, 2023);
   assert.equal(rows[0].trimEff, 3);

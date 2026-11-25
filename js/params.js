@@ -37,6 +37,18 @@ export const ACTIVITES = {
   bnc_cipav:{ label: 'Professions libérales réglementées (CIPAV)', facteur: 0.668, cipav: true },
 };
 
+/**
+ * Périodes assimilées (régime général) : nombre de jours d'indemnisation pour valider 1 trimestre ; 4 trimestres par an au maximum,
+ * tous statuts confondus. Sources : Assurance retraite, Unédic. Chômage non indemnisé et points Agirc-Arrco de maladie non modélisés.
+ */
+export const JOURS_PAR_TRIMESTRE = { maladie: 60, at: 60, invalidite: 90, maternite: 90, chomage: 50 };
+export const NATURES_IJ = {
+  maladie: 'Maladie',
+  at: 'Accident du travail / maladie professionnelle',
+  maternite: 'Maternité, paternité, adoption',
+  invalidite: 'Pension d’invalidité',
+};
+
 export const DEFAUTS = {
   revalorisation: 0.02,     // hypothèse annuelle de revalorisation des salaires passés (approx.)
   tauxNetSurBrut: 0.91,     // pension nette avant impôt ≈ brut × 0,91 (CSG, CRDS, CASA ; approx.)

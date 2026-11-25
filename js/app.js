@@ -4,14 +4,14 @@ import { creerZip } from './zip.js';
 import { texteDuPdf, analyserTexte, piecesJointesEml, pagesPdf, regrouperPages, decouperPdf, cleEmployeur } from './extract.js';
 import { lireZip } from './zipread.js';
 import { construireCarriere, syntheseRetraite, enfantsDroits } from './pension.js';
-import { ACTIVITES, DEFAUTS, parametresLegaux, formatAge } from './params.js';
+import { ACTIVITES, DEFAUTS, NATURES_IJ, JOURS_PAR_TRIMESTRE, parametresLegaux, formatAge } from './params.js';
 
 // ───────────────────────── Utilitaires ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
 const eur = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
 const eur2 = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' });
 const MOIS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
-const TYPES = { payslip: 'Bulletin de paie', urssaf: 'Déclaration Urssaf', autre: 'Autre document' };
+const TYPES = { payslip: 'Bulletin de paie', urssaf: 'Déclaration Urssaf', ij: 'Indemnités journalières (Assurance Maladie)', chomage: 'Chômage (France Travail)', autre: 'Autre document' };
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -359,7 +359,9 @@ function doublonProbable(m) {
   return state.docs.find((d) => d.type === m.type && d.year === m.year && (d.month || null) === (m.month || null) && (d.quarter || null) === (m.quarter || null)
     && cleEmployeur(groupeDe(d)) === cleEmployeur(groupeDe({ type: m.type, employer: m.employer }))) || null;
 }
-const memesMontants = (a, b) => (b.type === 'urssaf' ? b.ca != null && a.ca === b.ca : b.brut != null && a.brut === b.brut && a.net === b.net);
+const memesMontants = (a, b) => (b.type === 'urssaf' ? b.ca != null && a.ca === b.ca
+  : b.type === 'ij' || b.type === 'chomage' ? b.jours != null && a.jours === b.jours && a.montant === b.montant
+  : b.brut != null && a.brut === b.brut && a.net === b.net);
 
 async function traiterFile() {
   const item = state.queue.shift();
@@ -384,11 +386,12 @@ async function traiterFile() {
     catch { suggestion = analyserTexte('', item.name); }
   } else suggestion = analyserTexte('', item.name);
 
-  if (state.auto && suggestion.year && suggestion.type !== 'autre') {
+  if (state.auto && suggestion.year && suggestion.type !== 'autre' && (!['ij', 'chomage'].includes(suggestion.type) || suggestion.jours != null)) {
     const meta = {
       kind: 'doc', type: suggestion.type, year: suggestion.year, month: suggestion.month || null, quarter: suggestion.quarter || null,
       employer: suggestion.employer || '', brut: suggestion.brut ?? null, net: suggestion.net ?? null, ca: suggestion.ca ?? null,
-      activite: 'services', note: '', fileName: item.name, mime: item.type, size: item.buffer.byteLength, addedAt: new Date().toISOString(), hash: item.hash,
+      activite: 'services', nature: suggestion.nature || 'maladie', jours: suggestion.jours ?? null, montant: suggestion.montant ?? null, sjr: suggestion.sjr ?? null,
+      note: '', fileName: item.name, mime: item.type, size: item.buffer.byteLength, addedAt: new Date().toISOString(), hash: item.hash,
     };
     const prob = doublonProbable(meta);
     if (prob && memesMontants(prob, meta)) { state.doublons.push(libelle(prob)); return traiterFile(); }
@@ -417,6 +420,10 @@ function ouvrirFormulaire(doc, buffer, restants = 0, doublon = null) {
     net: h('input', { type: 'text', inputmode: 'decimal', value: doc.net ?? '' }),
     ca: h('input', { type: 'text', inputmode: 'decimal', value: doc.ca ?? '' }),
     activite: h('select', {}, Object.entries(ACTIVITES).map(([k, v]) => h('option', { value: k, selected: (doc.activite || 'services') === k }, v.label))),
+    nature: h('select', {}, Object.entries(NATURES_IJ).map(([k, v]) => h('option', { value: k, selected: (doc.nature || 'maladie') === k }, v))),
+    jours: h('input', { type: 'text', inputmode: 'numeric', value: doc.jours ?? '' }),
+    montant: h('input', { type: 'text', inputmode: 'decimal', value: doc.montant ?? '' }),
+    sjr: h('input', { type: 'text', inputmode: 'decimal', value: doc.sjr ?? '' }),
     note: h('input', { type: 'text', value: doc.note || '' }),
   };
   const zonePaie = h('div', { class: 'fields' },
@@ -425,14 +432,24 @@ function ouvrirFormulaire(doc, buffer, restants = 0, doublon = null) {
   const zoneUrssaf = h('div', { class: 'fields' },
     h('label', {}, 'Trimestre (si déclaration trimestrielle)', f.quarter), h('label', {}, 'Mois (si mensuelle)', f.month.cloneNode(true)),
     h('label', {}, 'Chiffre d’affaires déclaré (€)', f.ca), h('label', {}, 'Activité', f.activite));
+  const moisAssimSel = f.month.cloneNode(true);
+  const labNature = h('label', {}, 'Nature des indemnités', f.nature);
+  const labSjr = h('label', {}, 'Salaire journalier de référence (€, attestation France Travail)', f.sjr);
+  const zoneAssim = h('div', { class: 'fields' },
+    labNature, h('label', {}, 'Mois (laisser vide si le document couvre l’année)', moisAssimSel),
+    h('label', {}, 'Jours indemnisés', f.jours), h('label', {}, 'Montant total (€)', f.montant), labSjr);
   const majZones = () => {
-    zonePaie.hidden = f.type.value !== 'payslip';
-    zoneUrssaf.hidden = f.type.value !== 'urssaf';
+    const t = f.type.value;
+    zonePaie.hidden = t !== 'payslip';
+    zoneUrssaf.hidden = t !== 'urssaf';
+    zoneAssim.hidden = t !== 'ij' && t !== 'chomage';
+    labNature.hidden = t !== 'ij';
+    labSjr.hidden = t !== 'chomage';
   };
   f.type.addEventListener('change', majZones);
   majZones();
   const moisUrssaf = zoneUrssaf.querySelectorAll('select')[1];
-  if (doc.month) moisUrssaf.value = doc.month;
+  if (doc.month) { moisUrssaf.value = doc.month; moisAssimSel.value = doc.month; }
 
   const annuler = h('button', { type: 'button', onclick: () => { dlg.close(); traiterFile(); } }, estNouveau ? 'Ignorer' : 'Annuler');
   form.replaceChildren(
@@ -441,7 +458,8 @@ function ouvrirFormulaire(doc, buffer, restants = 0, doublon = null) {
       ? `${doc.fileName}${restants ? ` · encore ${restants} à traiter` : ''} — vérifiez les valeurs reconnues automatiquement.`
       : doc.fileName),
     h('div', { class: 'fields' }, h('label', {}, 'Type', f.type), h('label', {}, 'Année', f.year)),
-    zonePaie, zoneUrssaf,
+    zonePaie, zoneUrssaf, zoneAssim,
+    h('p', { class: 'muted', hidden: !(doc.type === 'ij' || doc.type === 'chomage') }, `Ces jours valident des trimestres : ${JOURS_PAR_TRIMESTRE.maladie} jours de maladie, ${JOURS_PAR_TRIMESTRE.maternite} jours de maternité ou d’invalidité, ${JOURS_PAR_TRIMESTRE.chomage} jours de chômage indemnisé = 1 trimestre (4 par an au maximum).`),
     h('datalist', { id: 'liste-employeurs' }, employeursConnus().map((e) => h('option', { value: e }))),
     h('label', {}, 'Note (facultatif)', f.note),
     doublon ? h('div', { class: 'notice' }, h('strong', {}, 'Doublon possible : '), `un document « ${libelle(doublon)} » (${groupeDe(doublon)}) est déjà enregistré pour cette période${doublon.brut != null ? `, brut ${eur2.format(doublon.brut)}` : ''}. Choisissez de l’ignorer, de le garder en plus ou de remplacer l’ancien.`) : null,
@@ -452,12 +470,12 @@ function ouvrirFormulaire(doc, buffer, restants = 0, doublon = null) {
   form.onsubmit = (ev) => { ev.preventDefault(); sauver(null); };
   const sauver = async (remplaceId) => {
     const type = f.type.value;
-    const moisSel = type === 'urssaf' ? moisUrssaf.value : f.month.value;
+    const moisSel = type === 'urssaf' ? moisUrssaf.value : (type === 'ij' || type === 'chomage') ? moisAssimSel.value : f.month.value;
     const meta = {
       kind: 'doc', type, year: Number(f.year.value), month: moisSel ? Number(moisSel) : null,
       quarter: type === 'urssaf' && f.quarter.value ? Number(f.quarter.value) : null,
       employer: f.employer.value.trim(), brut: num(f.brut.value), net: num(f.net.value), ca: num(f.ca.value),
-      activite: f.activite.value, note: f.note.value.trim(),
+      activite: f.activite.value, nature: f.nature.value, jours: num(f.jours.value), montant: num(f.montant.value), sjr: num(f.sjr.value), note: f.note.value.trim(),
       fileName: doc.fileName, mime: doc.mime, size: doc.size, addedAt: doc.addedAt || new Date().toISOString(), hash: doc.hash,
     };
     if (remplaceId) await vault.remove(remplaceId);
@@ -480,7 +498,7 @@ const libelle = (d) => {
 const nomFichier = (d) => {
   const ext = (d.fileName.match(/\.[a-z0-9]+$/i) || ['.pdf'])[0];
   const p = d.month ? String(d.month).padStart(2, '0') : d.quarter ? `T${d.quarter}` : '00';
-  const t = d.type === 'payslip' ? 'bulletin-paie' : d.type === 'urssaf' ? 'urssaf' : 'document';
+  const t = { payslip: 'bulletin-paie', urssaf: 'urssaf', ij: 'indemnites-journalieres', chomage: 'chomage' }[d.type] || 'document';
   return `${d.year}-${p}_${t}${d.type === 'payslip' && d.employer ? '_' + sansSeparateurs(d.employer) : ''}${ext}`;
 };
 const sansSeparateurs = (x) => x.replace(/[^\p{L}\p{N}-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -495,6 +513,8 @@ function employeursConnus() {
 /** Nom du sous-dossier d'un document : employeur, « Auto-entrepreneur » ou « Autres documents ». */
 function groupeDe(d) {
   if (d.type === 'urssaf') return 'Auto-entrepreneur (Urssaf)';
+  if (d.type === 'ij') return 'Assurance Maladie (indemnités journalières)';
+  if (d.type === 'chomage') return 'France Travail (chômage)';
   if (d.employer?.trim()) return d.employer.trim();
   return d.type === 'payslip' ? 'Employeur non renseigné' : 'Autres documents';
 }
@@ -620,7 +640,9 @@ function viewDocs() {
   const carte = (d) => {
     const montants = d.type === 'payslip'
       ? [d.brut != null ? `brut ${eur2.format(d.brut)}` : null, d.net != null ? `net ${eur2.format(d.net)}` : null]
-      : d.type === 'urssaf' ? [d.ca != null ? `CA ${eur2.format(d.ca)}` : null, ACTIVITES[d.activite]?.label] : [];
+      : d.type === 'urssaf' ? [d.ca != null ? `CA ${eur2.format(d.ca)}` : null, ACTIVITES[d.activite]?.label]
+      : d.type === 'ij' ? [d.jours != null ? `${d.jours} jours` : null, NATURES_IJ[d.nature], d.montant != null ? eur2.format(d.montant) : null]
+      : d.type === 'chomage' ? [d.jours != null ? `${d.jours} jours indemnisés` : null, d.montant != null ? eur2.format(d.montant) : null] : [];
     return h('div', { class: 'card doc' },
       h('div', { class: 'title' }, libelle(d)),
       h('div', { class: 'muted' }, [groupeDe(d), ...montants, d.note].filter(Boolean).join(' · ')),
@@ -674,7 +696,7 @@ function viewDocs() {
 function viewCarriere() {
   const root = h('div');
   root.append(h('h2', {}, 'Ma carrière année par année'));
-  root.append(h('p', { class: 'muted' }, 'Calculée à partir de vos documents. Auto-entrepreneur : saisissez dans « Trim. Urssaf » le nombre de trimestres (0 à 4) indiqué par votre attestation ou votre espace Urssaf ; ils s’ajoutent à vos trimestres de salarié, dans la limite de 4 par an, et remplacent l’estimation tirée du chiffre d’affaires. Les colonnes « Revenu retenu » et « Trimestres (corr.) » remplacent, elles, tout le calcul de l’année (utile si votre relevé info-retraite.fr dit autre chose).'));
+  root.append(h('p', { class: 'muted' }, 'Calculée à partir de vos documents. Arrêts maladie, maternité, invalidité et chômage indemnisé : ajoutez les relevés d’indemnités journalières de l’Assurance Maladie ou les attestations France Travail dans l’onglet Documents ; leurs jours valident des trimestres (60 jours de maladie, 90 de maternité ou d’invalidité, 50 de chômage = 1 trimestre, 4 par an au maximum, tous statuts confondus). Auto-entrepreneur : saisissez dans « Trim. Urssaf » le nombre de trimestres (0 à 4) indiqué par votre attestation ou votre espace Urssaf ; ils s’ajoutent à vos trimestres de salarié, dans la limite de 4 par an, et remplacent l’estimation tirée du chiffre d’affaires. Les colonnes « Revenu retenu » et « Trimestres (corr.) » remplacent, elles, tout le calcul de l’année (utile si votre relevé info-retraite.fr dit autre chose).'));
   const rows = construireCarriere(state.docs, state.career);
   const anneeCourante = new Date().getFullYear();
   if (!rows.length) { root.append(h('p', { class: 'muted' }, 'Ajoutez des documents ou une année manuellement.')); }
@@ -695,6 +717,11 @@ function viewCarriere() {
         incomplet ? h('span', { class: 'pill warn', style: 'margin-left:6px' }, `${r.mois}/12 mois`) : null),
       h('td', {}, r.salaire ? eur.format(r.salaire) : '—'),
       h('td', {}, r.ca ? eur.format(r.ca) : '—'),
+      h('td', { title: 'Jours d’indemnités journalières ou de chômage indemnisé relevés dans vos documents' },
+        (() => {
+          const p = [r.joursMal && `${r.joursMal} j maladie`, r.joursMat && `${r.joursMat} j maternité`, r.joursInv && `${r.joursInv} j invalidité`, r.joursCho && `${r.joursCho} j chômage`].filter(Boolean);
+          return p.length ? `${p.join(' · ')} → ${r.trimAssim} trim.` : '—';
+        })()),
       h('td', {}, h('input', { class: 'narrow', type: 'text', inputmode: 'numeric', value: ov.urssaf ?? '', placeholder: '0-4', 'aria-label': `Trimestres déclarés Urssaf ${r.year}`, onchange: (e) => maj('urssaf', e.target.value) })),
       h('td', {}, h('input', { type: 'text', inputmode: 'decimal', value: ov.revenu ?? '', placeholder: String(Math.round(r.salaire + r.revenuInd)), onchange: (e) => maj('revenu', e.target.value) })),
       h('td', {}, h('input', { class: 'narrow', type: 'text', inputmode: 'numeric', value: ov.trim ?? '', placeholder: String(r.trimAuto), onchange: (e) => maj('trim', e.target.value) })),
@@ -702,7 +729,7 @@ function viewCarriere() {
     ));
   }
   root.append(h('div', { class: 'card scroll' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['Année', 'Salaires bruts', 'CA auto-entr.', 'Trim. Urssaf (saisie)', 'Revenu retenu (€)', 'Trimestres (corr.)', 'Trimestres'].map((t) => h('th', {}, t)))),
+    h('thead', {}, h('tr', {}, ['Année', 'Salaires bruts', 'CA auto-entr.', 'Maladie / chômage', 'Trim. Urssaf (saisie)', 'Revenu retenu (€)', 'Trimestres (corr.)', 'Trimestres'].map((t) => h('th', {}, t)))),
     tbody)));
 
   const total = rows.reduce((s, r) => s + r.trimEff, 0);
@@ -844,7 +871,7 @@ function blocEnfants(p, droits = enfantsDroits(p.sexe, p.enfants)) {
     p.enfants.length
       ? h('p', {}, h('strong', {}, `Dans votre cas (${femme ? 'femme' : 'homme'}, ${p.enfants.length} enfant${p.enfants.length > 1 ? 's' : ''}) : `), `${droits.trimestres} trimestre${droits.trimestres > 1 ? 's' : ''} ajouté${droits.trimestres > 1 ? 's' : ''} à votre durée d’assurance${droits.enfantsAvecMajoration ? '' : ' (aucun, vous n’êtes pas le parent bénéficiaire)'}.`)
       : h('p', { class: 'muted' }, 'Ajoutez vos enfants ci-dessus pour voir l’effet sur votre retraite.'),
-    h('p', { class: 'muted' }, 'Non modélisés : adoption, enfant handicapé, carrière longue, congés parentaux, majorations Agirc-Arrco plafonnées.'));
+    h('p', { class: 'muted' }, 'Non modélisés : adoption, enfant handicapé, carrière longue, congés parentaux, majorations Agirc-Arrco plafonnées, chômage non indemnisé et points Agirc-Arrco des arrêts maladie.'));
 }
 
 async function nettoyerDoublons() {
